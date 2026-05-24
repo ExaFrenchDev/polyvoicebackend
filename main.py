@@ -19,11 +19,10 @@ app = Flask(__name__)
 WEBHOOK_SECRET    = os.getenv("WEBHOOK_SECRET", "")
 GROUP_ID          = int(os.getenv("GROUP_ID", "0"))
 ACCOUNT_COOKIE    = os.getenv("ROBLOX_ACCOUNT_COOKIE", "")
+ROBLOX_API_KEY    = os.getenv("ROBLOX_API_KEY", "")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 ADMIN_PASSWORD    = os.getenv("ADMIN_PASSWORD", "exa14170.")
 
-# ✅ Supabase / PostgreSQL connection string
-# Format: postgresql://postgres:<password>@db.<project-ref>.supabase.co:5432/postgres
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 logging.basicConfig(level=logging.INFO)
@@ -60,7 +59,7 @@ def init_db():
             devproduct_id     TEXT NOT NULL,
             amount_robux      INTEGER NOT NULL,
             final_amount      INTEGER,
-            status            TEXT DEFAULT \'pending\',
+            status            TEXT DEFAULT 'pending',
             created_at        TIMESTAMP DEFAULT NOW(),
             processed_at      TIMESTAMP,
             retry_count       INTEGER DEFAULT 0,
@@ -128,66 +127,111 @@ def check_eligibility(user_id, group_id, days_required=MIN_GROUP_TENURE_DAYS):
     return {"eligible": True, "reason": "Meets all requirements"}
 
 
+def transfer_robux_opencloud(target_user_id, amount_robux):
+    """
+    Transfert via Roblox Open Cloud API (clé API) — pas de challenge.
+    Endpoint: POST https://apis.roblox.com/cloud/v2/groups/{groupId}/payouts
+    """
+    headers = {
+        "x-api-key": ROBLOX_API_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "payouts": [
+            {
+                "userId": str(target_user_id),
+                "amount": amount_robux
+            }
+        ]
+    }
+    logger.info(f"[OpenCloud] Tentative: {amount_robux} R$ → user {target_user_id}")
+    response = requests.post(
+        f"https://apis.roblox.com/cloud/v2/groups/{GROUP_ID}/payouts",
+        json=payload,
+        headers=headers,
+        timeout=10
+    )
+    roblox_proof = {
+        "method": "open_cloud",
+        "endpoint": f"cloud/v2/groups/{GROUP_ID}/payouts",
+        "recipientId": target_user_id,
+        "amountSent": amount_robux,
+        "httpStatus": response.status_code,
+        "response": response.json() if response.content else {},
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+    if response.status_code == 200:
+        logger.info(f"✅ [OpenCloud] Payout réussi: {amount_robux} R$ → {target_user_id}")
+        return True, roblox_proof
+    else:
+        logger.error(f"❌ [OpenCloud] Payout failed: {response.status_code} — {response.text}")
+        return False, roblox_proof
+
+
+def transfer_robux_legacy(target_user_id, amount_robux):
+    """
+    Fallback : transfert via cookie .ROBLOSECURITY + CSRF token.
+    """
+    session = requests.Session()
+    session.cookies.set('.ROBLOSECURITY', ACCOUNT_COOKIE)
+
+    csrf_response = session.get('https://www.roblox.com/home', timeout=5)
+    csrf_token = csrf_response.headers.get('X-CSRF-TOKEN', '')
+
+    if not csrf_token:
+        csrf_response = session.post(
+            'https://auth.roblox.com/v2/logout',
+            headers={'X-CSRF-TOKEN': ''},
+            timeout=5
+        )
+        csrf_token = csrf_response.headers.get('X-CSRF-TOKEN', '')
+
+    headers = {
+        'X-CSRF-TOKEN': csrf_token,
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+    }
+    payload = {
+        "PayoutType": "FixedAmount",
+        "Recipients": [{"recipientId": target_user_id, "recipientType": "User", "amount": amount_robux}]
+    }
+    logger.info(f"[Legacy] Tentative: {amount_robux} R$ → user {target_user_id}")
+    response = session.post(
+        f'https://groups.roblox.com/v1/groups/{GROUP_ID}/payouts',
+        json=payload, headers=headers, timeout=10
+    )
+    roblox_proof = {
+        "method": "legacy_cookie",
+        "endpoint": f"groups/{GROUP_ID}/payouts",
+        "recipientId": target_user_id,
+        "amountSent": amount_robux,
+        "httpStatus": response.status_code,
+        "response": response.json() if response.content else {},
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+    if response.status_code == 200:
+        logger.info(f"✅ [Legacy] Payout réussi: {amount_robux} R$ → {target_user_id}")
+        return True, roblox_proof
+    else:
+        logger.error(f"❌ [Legacy] Payout failed: {response.status_code} — {response.text}")
+        return False, roblox_proof
+
+
 def transfer_robux(target_user_id, amount_robux):
     """
-    Effectue un transfert de Robux via l'API de groupe Roblox.
-    ✅ Récupère correctement le token CSRF via GET puis POST
-    Retourne (success: bool, roblox_proof: dict)
+    Essaie Open Cloud en priorité, puis fallback Legacy cookie.
     """
-    try:
-        session = requests.Session()
-        session.cookies.set('.ROBLOSECURITY', ACCOUNT_COOKIE)
-        
-        # ✅ ÉTAPE 1: GET sur /home pour récupérer le CSRF token initial
-        csrf_response = session.get('https://www.roblox.com/home', timeout=5)
-        csrf_token = csrf_response.headers.get('X-CSRF-TOKEN', '')
-        
-        logger.info(f"[CSRF] Token après GET /home: {csrf_token[:20]}..." if csrf_token else "[CSRF] Pas de token dans GET")
-        
-        # ✅ ÉTAPE 2: Si pas de token, faire un POST sur /logout pour en générer un
-        if not csrf_token:
-            headers_temp = {'X-CSRF-TOKEN': ''}
-            csrf_response = session.post('https://auth.roblox.com/v2/logout', headers=headers_temp, timeout=5)
-            csrf_token = csrf_response.headers.get('X-CSRF-TOKEN', '')
-            logger.info(f"[CSRF] Token après POST /logout: {csrf_token[:20]}..." if csrf_token else "[CSRF] Pas de token dans POST")
-        
-        # ✅ ÉTAPE 3: Utiliser le token pour le payout du groupe
-        headers = {
-            'X-CSRF-TOKEN': csrf_token,
-            'Content-Type': 'application/json',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-        }
-        
-        payload = {
-            "PayoutType": "FixedAmount",
-            "Recipients": [{"recipientId": target_user_id, "recipientType": "User", "amount": amount_robux}]
-        }
-        
-        logger.info(f"[PAYOUT] Tentative: {amount_robux} R$ → user {target_user_id} (groupe {GROUP_ID})")
-        
-        response = session.post(
-            f'https://groups.roblox.com/v1/groups/{GROUP_ID}/payouts',
-            json=payload, headers=headers, timeout=10
-        )
-        
-        roblox_proof = {
-            "endpoint": f"groups/{GROUP_ID}/payouts",
-            "recipientId": target_user_id,
-            "amountSent": amount_robux,
-            "httpStatus": response.status_code,
-            "response": response.json() if response.content else {},
-            "timestamp": datetime.utcnow().isoformat() + "Z"
-        }
-        
-        if response.status_code == 200:
-            logger.info(f"✅ Payout réussi: {amount_robux} R$ → {target_user_id}")
-            return True, roblox_proof
-        else:
-            logger.error(f"❌ Payout failed: {response.status_code} — {response.text}")
-            return False, roblox_proof
-    except Exception as e:
-        logger.error(f"❌ Exception transfert_robux: {e}")
-        return False, {"error": str(e), "timestamp": datetime.utcnow().isoformat() + "Z"}
+    if ROBLOX_API_KEY:
+        success, proof = transfer_robux_opencloud(target_user_id, amount_robux)
+        if success:
+            return True, proof
+        logger.warning("[Payout] Open Cloud échoué, tentative fallback Legacy...")
+
+    if ACCOUNT_COOKIE:
+        return transfer_robux_legacy(target_user_id, amount_robux)
+
+    logger.error("[Payout] Aucune méthode disponible (ni API key ni cookie)")
+    return False, {"error": "No auth method configured", "timestamp": datetime.utcnow().isoformat() + "Z"}
 
 
 # ============================================================================
@@ -827,7 +871,6 @@ def admin_stats():
         c.execute("SELECT COUNT(*) AS n FROM donations WHERE status = 'failed'")
         failed = c.fetchone()["n"]
         c.close(); conn.close()
-        # Show DB host without exposing password
         db_info = "non configurée"
         if DATABASE_URL:
             try:
@@ -902,7 +945,6 @@ def admin_update_status(donation_id):
             return jsonify({"error": "Donation not found"}), 404
         donation = dict(row)
 
-        # ✅ Si force_transfer=True ET status=completed → on fait le vrai transfert Roblox
         if new_status == "completed" and force_transfer:
             target_user_id = donation['target_player_id']
             amount = donation['final_amount']
@@ -916,7 +958,6 @@ def admin_update_status(donation_id):
                 conn.commit()
                 c.close(); conn.close()
 
-                # Mettre à jour l'embed Discord
                 donor_info  = get_user_info(donation['player_id'])
                 target_info = get_user_info(donation['target_player_id'])
                 donor_name  = donor_info.get("name",  str(donation['player_id']))        if donor_info  else str(donation['player_id'])
@@ -952,7 +993,6 @@ def admin_update_status(donation_id):
                 logger.error(f"❌ Transfert admin échoué pour donation #{donation_id}: {roblox_proof}")
                 return jsonify({"success": False, "transferred": False, "proof": roblox_proof}), 200
 
-        # Sinon → simple changement de statut sans transfert
         c.execute('UPDATE donations SET status = %s WHERE id = %s', (new_status, donation_id))
         conn.commit()
         c.close(); conn.close()
@@ -1028,6 +1068,7 @@ else:
     logger.warning("⚠️ DATABASE_URL non configurée — ajoute-la dans les env vars Render")
 
 logger.info(f"🔧 DevProducts: {list(DEVPRODUCT_AMOUNTS.keys())}")
+logger.info(f"🔑 Roblox API Key: {'OK (Open Cloud)' if ROBLOX_API_KEY else 'non configurée (fallback cookie)'}")
 logger.info(f"🔔 Discord: {'OK' if DISCORD_WEBHOOK_URL else 'non configuré'}")
 
 if __name__ == '__main__':
