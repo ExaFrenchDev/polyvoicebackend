@@ -226,6 +226,11 @@ class DonationCog(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         logger.info(f"✅ Discord bot connecté: {self.bot.user}")
+        try:
+            synced = await self.bot.tree.sync()
+            logger.info(f"✅ {len(synced)} slash commands synchronisées")
+        except Exception as e:
+            logger.error(f"❌ Erreur sync commands: {e}")
     
     async def send_donation_notification(self, player_name, target_name, amount, final_amount, taxes):
         """Envoyer une notification Discord"""
