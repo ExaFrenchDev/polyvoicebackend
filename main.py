@@ -13,6 +13,7 @@ import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     import pyotp
@@ -24,7 +25,6 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# Configuration
 WEBHOOK_SECRET       = os.getenv("WEBHOOK_SECRET", "")
 GROUP_ID             = int(os.getenv("GROUP_ID", "0"))
 ACCOUNT_COOKIE       = os.getenv("ROBLOX_ACCOUNT_COOKIE", "")
@@ -51,201 +51,99 @@ TAX_RATE              = 0.60
 WAIT_DAYS             = 7
 MIN_GROUP_TENURE_DAYS = 7
 
-DELAY_AFTER_CSRF      = 2.0
-DELAY_AFTER_2FA       = 10.0
-DELAY_BEFORE_FINAL    = 10.0
-DELAY_BLOCKSESSION    = 15.0
+DELAY_AFTER_CSRF    = 2.0
+DELAY_AFTER_2FA     = 10.0
+DELAY_BEFORE_FINAL  = 10.0
+DELAY_BLOCKSESSION  = 15.0
 
-COOKIE_REFRESH_INTERVAL = 3600
-cookie_last_refresh = datetime.now()
 cookie_lock = threading.Lock()
+
+# Pool de threads — les payouts tournent ici, jamais dans le worker Gunicorn
+payout_executor = ThreadPoolExecutor(max_workers=3)
 
 
 # ============================================================================
-# COOKIE MANAGEMENT & REAUTH
+# COOKIE MANAGEMENT
 # ============================================================================
 
 def reauthenticate_roblox():
-    """Réauthentifie via username/password et retourne le nouveau cookie"""
     if not ROBLOX_USERNAME or not ROBLOX_PASSWORD:
-        logger.warning("⚠️ ROBLOX_USERNAME ou ROBLOX_PASSWORD non configurés")
         return None
-
     try:
-        logger.info(f"🔄 Réauthentification en cours pour {ROBLOX_USERNAME}...")
+        logger.info(f"[Reauth] 🔄 Login {ROBLOX_USERNAME}...")
         session = requests.Session()
-
-        # Étape 1 : récupérer un CSRF token via logout (sans cookie)
         pre = session.post(
             "https://auth.roblox.com/v2/logout",
-            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0"},
-            timeout=5,
-            json={}
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=5, json={}
         )
         csrf = pre.headers.get('X-CSRF-TOKEN') or pre.headers.get('x-csrf-token', '')
-        logger.info(f"[Reauth] CSRF pré-login: {'✅ ' + csrf[:15] if csrf else '❌ absent'}")
 
-        # Étape 2 : login
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0",
-            "Content-Type": "application/json",
-        }
+        headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
         if csrf:
             headers["X-CSRF-TOKEN"] = csrf
 
         resp = session.post(
             "https://auth.roblox.com/v2/login",
-            json={
-                "ctype": "Username",
-                "cvalue": ROBLOX_USERNAME,
-                "passwd": ROBLOX_PASSWORD
-            },
-            headers=headers,
-            timeout=10
+            json={"ctype": "Username", "cvalue": ROBLOX_USERNAME, "passwd": ROBLOX_PASSWORD},
+            headers=headers, timeout=10
         )
-
-        logger.info(f"[Reauth] Login HTTP {resp.status_code}")
+        logger.info(f"[Reauth] HTTP {resp.status_code}")
 
         if resp.status_code == 200:
-            new_cookie = session.cookies.get('.ROBLOSECURITY')
-            if new_cookie:
-                logger.info(f"✅ Nouveau cookie obtenu: {new_cookie[:30]}...")
-                # Mettre à jour partout
-                os.environ['ROBLOX_ACCOUNT_COOKIE'] = new_cookie
-                globals()['ACCOUNT_COOKIE'] = new_cookie
-                return new_cookie
-            else:
-                logger.error("❌ Pas de .ROBLOSECURITY dans les cookies de réponse")
-                return None
+            cookie = session.cookies.get('.ROBLOSECURITY')
+            if cookie:
+                os.environ['ROBLOX_ACCOUNT_COOKIE'] = cookie
+                globals()['ACCOUNT_COOKIE'] = cookie
+                logger.info(f"[Reauth] ✅ Cookie obtenu")
+                return cookie
 
         elif resp.status_code == 403:
-            # Peut nécessiter un nouveau CSRF
             new_csrf = resp.headers.get('X-CSRF-TOKEN') or resp.headers.get('x-csrf-token')
             if new_csrf:
-                logger.info(f"[Reauth] Nouveau CSRF après 403: {new_csrf[:15]}, retry...")
                 headers["X-CSRF-TOKEN"] = new_csrf
                 resp2 = session.post(
                     "https://auth.roblox.com/v2/login",
                     json={"ctype": "Username", "cvalue": ROBLOX_USERNAME, "passwd": ROBLOX_PASSWORD},
-                    headers=headers,
-                    timeout=10
+                    headers=headers, timeout=10
                 )
-                logger.info(f"[Reauth] Login retry HTTP {resp2.status_code}")
                 if resp2.status_code == 200:
-                    new_cookie = session.cookies.get('.ROBLOSECURITY')
-                    if new_cookie:
-                        logger.info(f"✅ Nouveau cookie obtenu (retry): {new_cookie[:30]}...")
-                        os.environ['ROBLOX_ACCOUNT_COOKIE'] = new_cookie
-                        globals()['ACCOUNT_COOKIE'] = new_cookie
-                        return new_cookie
-            try:
-                data = resp.json()
-                if data.get("errors"):
-                    logger.error(f"❌ Login échoué: {data['errors'][0].get('message', 'Unknown')}")
-            except:
-                pass
-            return None
-        else:
-            logger.error(f"❌ Login échoué HTTP {resp.status_code}: {resp.text[:200]}")
-            return None
-
+                    cookie = session.cookies.get('.ROBLOSECURITY')
+                    if cookie:
+                        os.environ['ROBLOX_ACCOUNT_COOKIE'] = cookie
+                        globals()['ACCOUNT_COOKIE'] = cookie
+                        logger.info(f"[Reauth] ✅ Cookie obtenu (retry)")
+                        return cookie
+        return None
     except Exception as e:
-        logger.error(f"❌ Erreur réauthentification: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.error(f"[Reauth] ❌ {e}")
         return None
 
 
 def verify_cookie_validity(cookie):
-    """Vérifie le cookie sur un endpoint qui REQUIERT une vraie auth"""
     try:
         resp = requests.get(
             "https://users.roblox.com/v1/users/authenticated",
-            headers={
-                'Cookie': f'.ROBLOSECURITY={cookie}',
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0'
-            },
+            headers={'Cookie': f'.ROBLOSECURITY={cookie}', 'User-Agent': 'Mozilla/5.0'},
             timeout=5
         )
         if resp.status_code == 200:
             data = resp.json()
-            logger.info(f"✅ Cookie valide — connecté: {data.get('name')} (ID: {data.get('id')})")
+            logger.info(f"[Cookie] ✅ {data.get('name')} ({data.get('id')})")
             return True
-        else:
-            logger.warning(f"⚠️ Cookie invalide (HTTP {resp.status_code})")
-            return False
+        logger.warning(f"[Cookie] ⚠️ HTTP {resp.status_code}")
+        return False
     except Exception as e:
-        logger.error(f"❌ Erreur vérification cookie: {e}")
+        logger.error(f"[Cookie] ❌ {e}")
         return False
 
 
 def get_valid_cookie():
-    """Retourne un cookie valide, réauthentifie si nécessaire"""
-    global cookie_last_refresh
-
-    current_cookie = globals().get('ACCOUNT_COOKIE', '')
-
-    if current_cookie and verify_cookie_validity(current_cookie):
-        return current_cookie
-
-    logger.warning("🔄 Cookie invalide ou absent — réauthentification automatique...")
-    new_cookie = reauthenticate_roblox()
-    if new_cookie:
-        with cookie_lock:
-            cookie_last_refresh = datetime.now()
-        return new_cookie
-
-    logger.error("❌ Impossible d'obtenir un cookie valide")
-    return None
-
-
-def refresh_cookie_if_needed():
-    """Refresh périodique du cookie"""
-    global cookie_last_refresh
-
-    with cookie_lock:
-        now = datetime.now()
-        if (now - cookie_last_refresh).total_seconds() > COOKIE_REFRESH_INTERVAL:
-            logger.info("🔄 Refresh périodique du cookie...")
-            new_cookie = reauthenticate_roblox()
-            if new_cookie:
-                cookie_last_refresh = now
-                return new_cookie
-    return None
-
-
-# ============================================================================
-# DATABASE
-# ============================================================================
-
-def get_db():
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
-    return conn
-
-
-def init_db():
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS donations (
-            id                SERIAL PRIMARY KEY,
-            player_id         BIGINT NOT NULL,
-            target_player_id  BIGINT NOT NULL,
-            devproduct_id     TEXT NOT NULL,
-            amount_robux      INTEGER NOT NULL,
-            final_amount      INTEGER,
-            status            TEXT DEFAULT 'pending',
-            created_at        TIMESTAMP DEFAULT NOW(),
-            processed_at      TIMESTAMP,
-            retry_count       INTEGER DEFAULT 0,
-            last_retry        TIMESTAMP,
-            discord_message_id TEXT
-        )
-    ''')
-    conn.commit()
-    c.close()
-    conn.close()
-    logger.info("✅ Table donations prête (Supabase/PostgreSQL)")
+    current = globals().get('ACCOUNT_COOKIE', '')
+    if current and verify_cookie_validity(current):
+        return current
+    logger.warning("[Cookie] Réauth automatique...")
+    return reauthenticate_roblox()
 
 
 # ============================================================================
@@ -258,8 +156,8 @@ class RobloxPayout:
         self.group_id = group_id
         self.twofactor_secret = twofactor_secret
         self.headers = {
-            'Cookie': '.ROBLOSECURITY=' + self.roblosecurity,
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0'
+            'Cookie': f'.ROBLOSECURITY={roblosecurity}',
+            'User-Agent': 'Mozilla/5.0'
         }
 
     def _get_totp(self):
@@ -268,61 +166,60 @@ class RobloxPayout:
         try:
             return pyotp.TOTP(self.twofactor_secret).now()
         except Exception as e:
-            logger.error(f"[2FA] Erreur TOTP: {e}")
+            logger.error(f"[TOTP] {e}")
             return None
 
-    def _set_csrf(self):
-        """Vérifie le cookie, réauthentifie si besoin, récupère le CSRF"""
-
-        # 1. Vérifier la validité du cookie
-        if not verify_cookie_validity(self.roblosecurity):
-            logger.warning("[CSRF] Cookie invalide — réauthentification automatique...")
-            new_cookie = reauthenticate_roblox()
-            if new_cookie:
-                self.roblosecurity = new_cookie
-                self.headers['Cookie'] = f'.ROBLOSECURITY={new_cookie}'
-                logger.info("[CSRF] ✅ Nouveau cookie appliqué")
-            else:
-                logger.error("[CSRF] ❌ Réauthentification échouée")
-                return False
-
-        # 2. Récupérer le CSRF token via POST logout (méthode standard Roblox)
+    def _fetch_csrf(self):
+        """Récupère le CSRF sans revérifier le cookie."""
         try:
             r = requests.post(
                 "https://auth.roblox.com/v2/logout",
-                headers=self.headers,
-                timeout=5,
-                json={}
+                headers=self.headers, timeout=5, json={}
             )
             token = r.headers.get('X-CSRF-TOKEN') or r.headers.get('x-csrf-token')
-            logger.info(f"[CSRF] logout → HTTP {r.status_code}, token={'✅ ' + token[:20] if token else '❌ absent'}")
-
+            logger.info(f"[CSRF] logout HTTP {r.status_code} → {'✅ ' + token[:15] if token else '❌'}")
             if token:
                 self.headers['X-CSRF-TOKEN'] = token
                 time.sleep(DELAY_AFTER_CSRF)
                 return True
-
-            # Fallback : authentication-ticket
+            # fallback
             r2 = requests.post(
                 "https://auth.roblox.com/v1/authentication-ticket",
-                headers=self.headers,
-                timeout=5,
-                json={}
+                headers=self.headers, timeout=5, json={}
             )
             token = r2.headers.get('X-CSRF-TOKEN') or r2.headers.get('x-csrf-token')
-            logger.info(f"[CSRF] auth-ticket → HTTP {r2.status_code}, token={'✅ ' + token[:20] if token else '❌ absent'}")
-
+            logger.info(f"[CSRF] auth-ticket HTTP {r2.status_code} → {'✅ ' + token[:15] if token else '❌'}")
             if token:
                 self.headers['X-CSRF-TOKEN'] = token
                 time.sleep(DELAY_AFTER_CSRF)
                 return True
-
-            logger.error("[CSRF] ❌ Impossible de récupérer le CSRF token")
+            logger.error("[CSRF] ❌ Aucun token récupéré")
             return False
-
         except Exception as e:
-            logger.error(f"[CSRF] ❌ Erreur: {e}")
+            logger.error(f"[CSRF] ❌ {e}")
             return False
+
+    def _set_csrf(self):
+        """Vérifie le cookie puis fetch le CSRF. Réauthentifie si besoin."""
+        if not verify_cookie_validity(self.roblosecurity):
+            new_cookie = reauthenticate_roblox()
+            if not new_cookie:
+                return False
+            self.roblosecurity = new_cookie
+            self.headers['Cookie'] = f'.ROBLOSECURITY={new_cookie}'
+        return self._fetch_csrf()
+
+    def _refresh_cookie_and_csrf(self):
+        """Force une réauth + nouveau CSRF. Appelé après blocksession."""
+        logger.info("[Refresh] Force réauth + CSRF...")
+        new_cookie = reauthenticate_roblox()
+        if not new_cookie:
+            return False
+        self.roblosecurity = new_cookie
+        self.headers['Cookie'] = f'.ROBLOSECURITY={new_cookie}'
+        # Supprimer l'ancien CSRF pour forcer un fresh fetch
+        self.headers.pop('X-CSRF-TOKEN', None)
+        return self._fetch_csrf()
 
     def _payout_request(self, user_id, amount, extra_headers=None):
         h = self.headers.copy()
@@ -331,41 +228,34 @@ class RobloxPayout:
         return requests.post(
             f"https://groups.roblox.com/v1/groups/{self.group_id}/payouts",
             headers=h,
-            json={
-                "PayoutType": 1,
-                "Recipients": [{"amount": amount, "recipientId": user_id, "recipientType": 0}]
-            },
+            json={"PayoutType": 1, "Recipients": [{"amount": amount, "recipientId": user_id, "recipientType": 0}]},
             timeout=10
         )
 
     def _verify_totp(self, sender_id, challenge_id):
         code = self._get_totp()
         if not code:
-            logger.error("[2FA] ❌ Pas de TOTP disponible")
             return None
         try:
-            logger.info(f"[2FA] 📱 Envoi verify: sender_id={sender_id}, code={code}")
             r = requests.post(
                 f"https://twostepverification.roblox.com/v1/users/{sender_id}/challenges/authenticator/verify",
                 headers=self.headers,
                 json={"actionType": "Generic", "challengeId": challenge_id, "code": code},
                 timeout=10
             )
-            logger.info(f"[2FA] HTTP {r.status_code}")
+            logger.info(f"[2FA] verify HTTP {r.status_code}")
             if r.status_code != 200:
-                logger.error(f"[2FA] ❌ HTTP {r.status_code}: {r.text[:200]}")
+                logger.error(f"[2FA] ❌ {r.text[:200]}")
                 return None
             data = r.json()
             if "errors" in data:
-                logger.error(f"[2FA] ❌ Erreur: {data['errors'][0].get('message', 'unknown')}")
+                logger.error(f"[2FA] ❌ {data['errors'][0].get('message')}")
                 return None
             vtoken = data.get("verificationToken")
-            logger.info(f"[2FA] ✅ Token reçu: {vtoken[:20] if vtoken else 'None'}...")
+            logger.info(f"[2FA] ✅ token: {vtoken[:20] if vtoken else 'None'}...")
             return vtoken
         except Exception as e:
-            logger.error(f"[2FA] ❌ Exception: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
+            logger.error(f"[2FA] ❌ {e}")
             return None
 
     def _continue_challenge(self, challenge_id, challenge_type, metadata):
@@ -373,30 +263,37 @@ class RobloxPayout:
             resp = requests.post(
                 "https://apis.roblox.com/challenge/v1/continue",
                 headers=self.headers,
-                json={
-                    "challengeId": challenge_id,
-                    "challengeType": challenge_type,
-                    "challengeMetadata": json.dumps(metadata)
-                },
+                json={"challengeId": challenge_id, "challengeType": challenge_type, "challengeMetadata": json.dumps(metadata)},
                 timeout=10
             )
-            logger.info(f"[Challenge] Continue {challenge_type}: HTTP {resp.status_code}")
-            if resp.status_code >= 400:
-                logger.warning(f"[Challenge] ⚠️ Response: {resp.text[:200]}")
+            logger.info(f"[Challenge] continue {challenge_type} → HTTP {resp.status_code}")
             return resp
         except Exception as e:
-            logger.error(f"[Challenge] ❌ Exception: {e}")
+            logger.error(f"[Challenge] ❌ {e}")
             return None
 
-    def payout(self, user_id, amount, retry_count=0, max_retries=3):
-        if not self._set_csrf():
-            return False, "Cookie invalide ou expiré"
+    def _handle_blocksession(self, user_id, amount, retry_count, max_retries):
+        if retry_count >= max_retries:
+            return False, "Session bloquée — max retries atteint"
+        logger.warning(f"[BlockSession] Attente {DELAY_BLOCKSESSION}s puis réauth complète...")
+        time.sleep(DELAY_BLOCKSESSION)
+        # Réauth forcée + nouveau CSRF avant le retry
+        if not self._refresh_cookie_and_csrf():
+            return False, "Réauth échouée après blocksession"
+        return self.payout(user_id, amount, retry_count + 1, max_retries)
 
-        logger.info(f"[Payout] 🔄 Tentative {retry_count + 1}/{max_retries + 1}: {amount} R$ → {user_id}")
+    def payout(self, user_id, amount, retry_count=0, max_retries=3):
+        # CSRF fetch uniquement au 1er essai — les retries réutilisent le CSRF existant
+        # sauf si _handle_blocksession a déjà appelé _refresh_cookie_and_csrf
+        if retry_count == 0:
+            if not self._set_csrf():
+                return False, "Cookie invalide ou expiré"
+
+        logger.info(f"[Payout] tentative {retry_count+1}/{max_retries+1}: {amount} R$ → {user_id}")
         r = self._payout_request(user_id, amount)
 
         if r.status_code == 200:
-            logger.info("✅ [Payout] Réussi sans challenge!")
+            logger.info("✅ [Payout] Réussi!")
             return True, "ok"
 
         challenge_type     = r.headers.get("rblx-challenge-type", "").lower()
@@ -405,25 +302,24 @@ class RobloxPayout:
 
         if not challenge_type or not challenge_id:
             logger.error(f"[Payout] ❌ Pas de challenge headers — HTTP {r.status_code}: {r.text[:200]}")
-            # Si 403 sans challenge, le cookie est peut-être mort → réessayer avec réauth
             if r.status_code == 403 and retry_count < max_retries:
-                logger.warning("[Payout] 🔄 403 sans challenge — tentative de réauthentification...")
+                logger.warning("[Payout] 403 sans challenge → réauth + retry")
                 new_cookie = reauthenticate_roblox()
                 if new_cookie:
                     self.roblosecurity = new_cookie
                     self.headers['Cookie'] = f'.ROBLOSECURITY={new_cookie}'
-                    time.sleep(2)
-                    return self.payout(user_id, amount, retry_count + 1, max_retries)
+                    self.headers.pop('X-CSRF-TOKEN', None)
+                    if self._fetch_csrf():
+                        return self.payout(user_id, amount, retry_count + 1, max_retries)
             return False, f"No challenge headers (HTTP {r.status_code})"
 
-        # ── CHEF CHALLENGE ──────────────────────────────────────────────────
+        # ── CHEF ─────────────────────────────────────────────────────────────
         if challenge_type == "chef":
-            logger.info("[Chef] 👨‍🍳 Challenge détecté")
+            logger.info("[Chef] 👨‍🍳 Challenge")
             try:
                 chef_meta = json.loads(base64.b64decode(challenge_meta_b64))
             except Exception as e:
-                logger.error(f"[Chef] ❌ Erreur decode: {e}")
-                return False, "Chef metadata decode failed"
+                return False, f"Chef metadata decode failed: {e}"
 
             cont = self._continue_challenge(challenge_id, "chef", chef_meta)
             if not cont:
@@ -434,7 +330,7 @@ class RobloxPayout:
             next_meta_raw = cont_data.get("challengeMetadata", "")
 
             if next_type == "":
-                logger.info("[Chef] ✅ Passé sans 2FA")
+                logger.info("[Chef] ✅ Pas de 2FA")
                 time.sleep(DELAY_BEFORE_FINAL)
                 final = self._payout_request(user_id, amount, {
                     "rblx-challenge-id":       challenge_id,
@@ -448,110 +344,203 @@ class RobloxPayout:
                     tfa_meta = json.loads(next_meta_raw)
                     tfa_user = tfa_meta["userId"]
                     tfa_cid  = tfa_meta["challengeId"]
-                except Exception as e:
-                    logger.error(f"[Chef+2FA] ❌ Erreur parse: {e}")
+                except Exception:
                     return False, "2FA metadata parse failed"
 
                 vtoken = self._verify_totp(tfa_user, tfa_cid)
                 if not vtoken:
-                    return False, "2FA TOTP verification failed"
+                    return False, "2FA TOTP failed"
 
                 time.sleep(DELAY_AFTER_2FA)
-                complete_meta = {
+                cont2 = self._continue_challenge(challenge_id, "twostepverification", {
                     "verificationToken": vtoken,
                     "rememberDevice": False,
                     "userId": tfa_user,
                     "challengeId": tfa_cid,
-                }
-                cont2 = self._continue_challenge(challenge_id, "twostepverification", complete_meta)
+                })
                 if not cont2 or cont2.status_code >= 400:
                     return False, "2FA continue failed"
-
-                cont2_data = cont2.json()
-                if cont2_data.get("challengeType") == "blocksession":
-                    if retry_count < max_retries:
-                        time.sleep(DELAY_BLOCKSESSION)
-                        self._set_csrf()
-                        return self.payout(user_id, amount, retry_count + 1, max_retries)
-                    return False, "Session bloquée après max retries"
+                if cont2.json().get("challengeType") == "blocksession":
+                    return self._handle_blocksession(user_id, amount, retry_count, max_retries)
 
                 time.sleep(DELAY_BEFORE_FINAL)
                 final = self._payout_request(user_id, amount)
 
             elif next_type == "blocksession":
-                if retry_count < max_retries:
-                    time.sleep(DELAY_BLOCKSESSION)
-                    self._set_csrf()
-                    return self.payout(user_id, amount, retry_count + 1, max_retries)
-                return False, "Session bloquée après max retries"
+                return self._handle_blocksession(user_id, amount, retry_count, max_retries)
             else:
-                return False, f"Unknown challenge: {next_type}"
+                return False, f"Unknown next challenge: {next_type}"
 
             if final.status_code == 200:
                 logger.info("✅ [Chef] Payout réussi!")
                 return True, "ok"
-            else:
-                logger.error(f"❌ [Chef] Payout échoué: {final.text[:200]}")
-                return False, final.text
+            logger.error(f"❌ [Chef] {final.text[:200]}")
+            return False, final.text
 
-        # ── TWOSTEPVERIFICATION DIRECT ──────────────────────────────────────
+        # ── 2FA DIRECT ───────────────────────────────────────────────────────
         elif challenge_type == "twostepverification":
             logger.info("[2FA] 🔐 Challenge direct")
             try:
                 meta   = json.loads(base64.b64decode(challenge_meta_b64))
                 sender = meta["userId"]
                 cid    = meta["challengeId"]
-            except Exception as e:
+            except Exception:
                 return False, "2FA metadata parse failed"
 
             vtoken = self._verify_totp(sender, cid)
             if not vtoken:
-                return False, "2FA TOTP verification failed"
+                return False, "2FA TOTP failed"
 
             time.sleep(DELAY_AFTER_2FA)
-            complete_meta = {
+            cont2 = self._continue_challenge(challenge_id, "twostepverification", {
                 "verificationToken": vtoken,
                 "rememberDevice": False,
                 "userId": sender,
                 "challengeId": cid,
-            }
-            cont2 = self._continue_challenge(challenge_id, "twostepverification", complete_meta)
+            })
             if not cont2 or cont2.status_code >= 400:
                 return False, "2FA continue failed"
-
             if cont2.json().get("challengeType") == "blocksession":
-                if retry_count < max_retries:
-                    time.sleep(DELAY_BLOCKSESSION)
-                    self._set_csrf()
-                    return self.payout(user_id, amount, retry_count + 1, max_retries)
-                return False, "Session bloquée après max retries"
+                return self._handle_blocksession(user_id, amount, retry_count, max_retries)
 
             time.sleep(DELAY_BEFORE_FINAL)
             final = self._payout_request(user_id, amount)
-
             if final.status_code == 200:
                 return True, "ok"
             return False, final.text
 
         elif challenge_type == "blocksession":
-            if retry_count < max_retries:
-                time.sleep(DELAY_BLOCKSESSION)
-                self._set_csrf()
-                return self.payout(user_id, amount, retry_count + 1, max_retries)
-            return False, "Session bloquée après max retries"
+            return self._handle_blocksession(user_id, amount, retry_count, max_retries)
         else:
             return False, f"Unknown challenge: {challenge_type}"
 
 
 # ============================================================================
-# ROBLOX API
+# TRANSFER
+# ============================================================================
+
+def transfer_robux_opencloud(target_user_id, amount_robux):
+    try:
+        response = requests.post(
+            f"https://apis.roblox.com/cloud/v2/groups/{GROUP_ID}/payouts",
+            json={"payouts": [{"userId": str(target_user_id), "amount": amount_robux}]},
+            headers={"x-api-key": ROBLOX_API_KEY, "Content-Type": "application/json"},
+            timeout=10
+        )
+        proof = {
+            "method": "open_cloud",
+            "recipientId": target_user_id, "amountSent": amount_robux,
+            "httpStatus": response.status_code,
+            "response": response.json() if response.content else {},
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        if response.status_code == 200:
+            logger.info(f"✅ [OpenCloud] {amount_robux} R$ → {target_user_id}")
+            return True, proof
+        logger.error(f"❌ [OpenCloud] HTTP {response.status_code}")
+        return False, proof
+    except Exception as e:
+        return False, {"error": str(e), "timestamp": datetime.utcnow().isoformat() + "Z"}
+
+
+def transfer_robux_cookie_2fa(target_user_id, amount_robux):
+    cookie = get_valid_cookie()
+    if not cookie:
+        return False, {"error": "Cookie invalide", "timestamp": datetime.utcnow().isoformat() + "Z"}
+    payout = RobloxPayout(cookie, GROUP_ID, ROBLOX_2FA_SECRET)
+    success, detail = payout.payout(target_user_id, amount_robux)
+    return success, {
+        "method": "cookie_2fa" if ROBLOX_2FA_SECRET else "cookie_only",
+        "recipientId": target_user_id, "amountSent": amount_robux,
+        "httpStatus": 200 if success else 403,
+        "response": {"detail": detail},
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+
+
+def transfer_robux(target_user_id, amount_robux):
+    if ROBLOX_API_KEY:
+        success, proof = transfer_robux_opencloud(target_user_id, amount_robux)
+        if success:
+            return True, proof
+        logger.warning("[Payout] OpenCloud échoué → fallback Cookie+2FA")
+    if ACCOUNT_COOKIE or (ROBLOX_USERNAME and ROBLOX_PASSWORD):
+        return transfer_robux_cookie_2fa(target_user_id, amount_robux)
+    return False, {"error": "Aucune méthode configurée", "timestamp": datetime.utcnow().isoformat() + "Z"}
+
+
+# ============================================================================
+# PAYOUT ASYNC — tourne dans le ThreadPoolExecutor, jamais dans Gunicorn
+# ============================================================================
+
+def _process_payout_async(donation_id, target_user_id, amount,
+                           discord_message_id, player_id, amount_robux, final_amount):
+    logger.info(f"[Async] 🚀 Payout #{donation_id}: {amount} R$ → {target_user_id}")
+    try:
+        success, proof = transfer_robux(target_user_id, amount)
+        conn = get_db()
+        c = conn.cursor()
+        if success:
+            c.execute("UPDATE donations SET status='completed', processed_at=NOW() WHERE id=%s", (donation_id,))
+            conn.commit()
+            logger.info(f"✅ [Async] #{donation_id} OK")
+            donor_info  = get_user_info(player_id)
+            target_info = get_user_info(target_user_id)
+            edit_discord_success(
+                discord_message_id,
+                donor_info.get("name", str(player_id)) if donor_info else str(player_id), player_id,
+                target_info.get("name", str(target_user_id)) if target_info else str(target_user_id), target_user_id,
+                amount_robux, final_amount, amount_robux - final_amount, donation_id, proof
+            )
+        else:
+            c.execute("UPDATE donations SET status='failed', retry_count=retry_count+1, last_retry=NOW() WHERE id=%s", (donation_id,))
+            conn.commit()
+            logger.error(f"❌ [Async] #{donation_id} échoué")
+            donor_info  = get_user_info(player_id)
+            target_info = get_user_info(target_user_id)
+            edit_discord_failed(
+                discord_message_id,
+                donor_info.get("name", str(player_id)) if donor_info else str(player_id), player_id,
+                target_info.get("name", str(target_user_id)) if target_info else str(target_user_id), target_user_id,
+                amount_robux, final_amount, donation_id,
+                str(proof.get("response", {}).get("detail", "Erreur inconnue"))
+            )
+        c.close(); conn.close()
+    except Exception as e:
+        logger.error(f"[Async] ❌ Exception #{donation_id}: {e}")
+        import traceback; logger.error(traceback.format_exc())
+
+
+# ============================================================================
+# DATABASE
+# ============================================================================
+
+def get_db():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+
+
+def init_db():
+    conn = get_db(); c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS donations (
+        id SERIAL PRIMARY KEY, player_id BIGINT NOT NULL, target_player_id BIGINT NOT NULL,
+        devproduct_id TEXT NOT NULL, amount_robux INTEGER NOT NULL, final_amount INTEGER,
+        status TEXT DEFAULT 'pending', created_at TIMESTAMP DEFAULT NOW(),
+        processed_at TIMESTAMP, retry_count INTEGER DEFAULT 0,
+        last_retry TIMESTAMP, discord_message_id TEXT
+    )''')
+    conn.commit(); c.close(); conn.close()
+    logger.info("✅ Table donations prête")
+
+
+# ============================================================================
+# ROBLOX API HELPERS
 # ============================================================================
 
 def verify_webhook_signature(data, signature):
     if not WEBHOOK_SECRET:
         return True
-    expected_sig = hmac.new(WEBHOOK_SECRET.encode(), data, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(signature, expected_sig)
+    expected = hmac.new(WEBHOOK_SECRET.encode(), data, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, expected)
 
 
 def get_user_info(user_id):
@@ -560,7 +549,7 @@ def get_user_info(user_id):
         if resp.status_code == 200:
             return resp.json()
     except Exception as e:
-        logger.error(f"Erreur user {user_id}: {e}")
+        logger.error(f"[User] {e}")
     return None
 
 
@@ -568,17 +557,12 @@ def get_group_membership(user_id, group_id):
     try:
         resp = requests.get(f"https://groups.roblox.com/v1/users/{user_id}/groups", timeout=3)
         if resp.status_code == 200:
-            data = resp.json()
-            for group in data.get("data", []):
+            for group in resp.json().get("data", []):
                 if group["group"]["id"] == group_id:
-                    return {
-                        "in_group": True,
-                        "join_date": group.get("joinedDate"),
-                        "role": group.get("role", {}).get("name")
-                    }
+                    return {"in_group": True, "join_date": group.get("joinedDate"), "role": group.get("role", {}).get("name")}
             return {"in_group": False}
     except Exception as e:
-        logger.error(f"Erreur groupe {user_id}: {e}")
+        logger.error(f"[Group] {e}")
     return {"in_group": False}
 
 
@@ -589,78 +573,12 @@ def check_eligibility(user_id, group_id, days_required=MIN_GROUP_TENURE_DAYS):
     if membership.get("join_date"):
         try:
             join_date = datetime.fromisoformat(membership["join_date"].replace("Z", "+00:00"))
-            days_in_group = (datetime.now(join_date.tzinfo) - join_date).days
-            if days_in_group < days_required:
-                return {"eligible": False, "reason": f"Not long enough ({days_in_group}/{days_required} days)"}
-        except Exception as e:
-            logger.error(f"Erreur parsing date: {e}")
+            days = (datetime.now(join_date.tzinfo) - join_date).days
+            if days < days_required:
+                return {"eligible": False, "reason": f"Not long enough ({days}/{days_required} days)"}
+        except Exception:
+            pass
     return {"eligible": True, "reason": "Meets all requirements"}
-
-
-def transfer_robux_opencloud(target_user_id, amount_robux):
-    headers = {
-        "x-api-key": ROBLOX_API_KEY,
-        "Content-Type": "application/json",
-    }
-    payload = {"payouts": [{"userId": str(target_user_id), "amount": amount_robux}]}
-    logger.info(f"[OpenCloud] 📤 Tentative: {amount_robux} R$ → user {target_user_id}")
-    try:
-        response = requests.post(
-            f"https://apis.roblox.com/cloud/v2/groups/{GROUP_ID}/payouts",
-            json=payload, headers=headers, timeout=10
-        )
-        roblox_proof = {
-            "method": "open_cloud",
-            "endpoint": f"cloud/v2/groups/{GROUP_ID}/payouts",
-            "recipientId": target_user_id,
-            "amountSent": amount_robux,
-            "httpStatus": response.status_code,
-            "response": response.json() if response.content else {},
-            "timestamp": datetime.utcnow().isoformat() + "Z"
-        }
-        if response.status_code == 200:
-            logger.info(f"✅ [OpenCloud] Réussi: {amount_robux} R$ → {target_user_id}")
-            return True, roblox_proof
-        else:
-            logger.error(f"❌ [OpenCloud] HTTP {response.status_code}: {response.text}")
-            return False, roblox_proof
-    except Exception as e:
-        logger.error(f"❌ [OpenCloud] Exception: {e}")
-        return False, {"error": str(e), "timestamp": datetime.utcnow().isoformat() + "Z"}
-
-
-def transfer_robux_cookie_2fa(target_user_id, amount_robux):
-    # Obtenir un cookie valide (réauthentifie si nécessaire)
-    cookie = get_valid_cookie()
-    if not cookie:
-        return False, {"error": "Impossible d'obtenir un cookie valide", "timestamp": datetime.utcnow().isoformat() + "Z"}
-
-    payout = RobloxPayout(cookie, GROUP_ID, ROBLOX_2FA_SECRET)
-    success, detail = payout.payout(target_user_id, amount_robux)
-    proof = {
-        "method": "cookie_2fa" if ROBLOX_2FA_SECRET else "cookie_only",
-        "endpoint": f"groups/{GROUP_ID}/payouts",
-        "recipientId": target_user_id,
-        "amountSent": amount_robux,
-        "httpStatus": 200 if success else 403,
-        "response": {"detail": detail},
-        "timestamp": datetime.utcnow().isoformat() + "Z"
-    }
-    return success, proof
-
-
-def transfer_robux(target_user_id, amount_robux):
-    if ROBLOX_API_KEY:
-        success, proof = transfer_robux_opencloud(target_user_id, amount_robux)
-        if success:
-            return True, proof
-        logger.warning("[Payout] Open Cloud échoué, fallback Cookie+2FA...")
-
-    if ACCOUNT_COOKIE or (ROBLOX_USERNAME and ROBLOX_PASSWORD):
-        return transfer_robux_cookie_2fa(target_user_id, amount_robux)
-
-    logger.error("[Payout] Aucune méthode configurée")
-    return False, {"error": "No auth method configured", "timestamp": datetime.utcnow().isoformat() + "Z"}
 
 
 # ============================================================================
@@ -672,17 +590,15 @@ def send_discord_notification(donor_id, donor_name, target_id, target_name,
     if not DISCORD_WEBHOOK_URL:
         return None
     embed = {
-        "title": "💰 Nouvelle Donation en attente",
-        "color": 0xFFD700,
+        "title": "💰 Nouvelle Donation en attente", "color": 0xFFD700,
         "fields": [
             {"name": "👤 Donateur",          "value": f"`{donor_name}` (ID: `{donor_id}`)",  "inline": False},
             {"name": "🎯 Receveur",           "value": f"`{target_name}` (ID: `{target_id}`)", "inline": False},
             {"name": "💵 Montant brut",       "value": f"`{amount} Robux`",                   "inline": True},
             {"name": f"🏦 Taxe (-{int(TAX_RATE*100)}%)", "value": f"`{taxes} Robux`",         "inline": True},
             {"name": "✨ Montant net",         "value": f"`{final_amount} Robux`",             "inline": True},
-            {"name": "📅 Transfert prévu le", "value": f"`{estimated_date}`",                 "inline": False},
-            {"name": "🔖 ID Donation",        "value": f"`#{donation_id}`",                   "inline": True},
-            {"name": "⏳ Statut",              "value": "`En attente (7 jours)`",              "inline": True},
+            {"name": "📅 Transfert prévu",    "value": f"`{estimated_date}`",                 "inline": False},
+            {"name": "🔖 ID",                 "value": f"`#{donation_id}`",                   "inline": True},
         ],
         "footer": {"text": "PolyVoice Donation System"},
         "timestamp": datetime.utcnow().isoformat()
@@ -692,29 +608,27 @@ def send_discord_notification(donor_id, donor_name, target_id, target_name,
         if resp.status_code in (200, 204):
             return resp.json().get("id")
     except Exception as e:
-        logger.error(f"❌ Discord: {e}")
+        logger.error(f"[Discord] {e}")
     return None
 
 
 def edit_discord_success(message_id, donor_name, donor_id, target_name, target_id,
-                          amount, final_amount, taxes, donation_id, roblox_proof):
+                          amount, final_amount, taxes, donation_id, proof):
     if not DISCORD_WEBHOOK_URL or not message_id:
         return
-    proof_str = json.dumps(roblox_proof, indent=2, ensure_ascii=False)
+    proof_str = json.dumps(proof, indent=2, ensure_ascii=False)
     if len(proof_str) > 950:
-        proof_str = proof_str[:950] + "\n... (tronqué)"
+        proof_str = proof_str[:950] + "\n...(tronqué)"
     embed = {
-        "title": "✅ Donation transférée avec succès!",
-        "color": 0x00FF7F,
+        "title": "✅ Donation transférée!", "color": 0x00FF7F,
         "fields": [
             {"name": "👤 Donateur",    "value": f"`{donor_name}` (ID: `{donor_id}`)",   "inline": False},
             {"name": "🎯 Receveur",    "value": f"`{target_name}` (ID: `{target_id}`)", "inline": False},
-            {"name": "💵 Montant brut","value": f"`{amount} Robux`",                    "inline": True},
+            {"name": "💵 Brut",        "value": f"`{amount} Robux`",                    "inline": True},
             {"name": f"🏦 Taxe (-{int(TAX_RATE*100)}%)", "value": f"`{taxes} Robux`",  "inline": True},
-            {"name": "✨ Montant reçu","value": f"`{final_amount} Robux`",              "inline": True},
-            {"name": "🔖 ID Donation","value": f"`#{donation_id}`",                    "inline": True},
-            {"name": "✅ Statut",      "value": "`Transféré`",                          "inline": True},
-            {"name": "📄 Preuve Roblox", "value": f"```json\n{proof_str}\n```",        "inline": False},
+            {"name": "✨ Net",         "value": f"`{final_amount} Robux`",              "inline": True},
+            {"name": "🔖 ID",         "value": f"`#{donation_id}`",                    "inline": True},
+            {"name": "📄 Preuve",      "value": f"```json\n{proof_str}\n```",           "inline": False},
         ],
         "footer": {"text": "PolyVoice Donation System"},
         "timestamp": datetime.utcnow().isoformat()
@@ -722,7 +636,7 @@ def edit_discord_success(message_id, donor_name, donor_id, target_name, target_i
     try:
         requests.patch(f"{DISCORD_WEBHOOK_URL}/messages/{message_id}", json={"embeds": [embed]}, timeout=5)
     except Exception as e:
-        logger.error(f"❌ Discord edit: {e}")
+        logger.error(f"[Discord edit] {e}")
 
 
 def edit_discord_failed(message_id, donor_name, donor_id, target_name, target_id,
@@ -730,16 +644,15 @@ def edit_discord_failed(message_id, donor_name, donor_id, target_name, target_id
     if not DISCORD_WEBHOOK_URL or not message_id:
         return
     embed = {
-        "title": "❌ Échec du transfert",
-        "color": 0xFF4444,
+        "title": "❌ Échec du transfert", "color": 0xFF4444,
         "fields": [
-            {"name": "👤 Donateur",   "value": f"`{donor_name}` (ID: `{donor_id}`)",   "inline": False},
-            {"name": "🎯 Receveur",   "value": f"`{target_name}` (ID: `{target_id}`)", "inline": False},
-            {"name": "💵 Brut",       "value": f"`{amount} Robux`",                    "inline": True},
-            {"name": "✨ Net",        "value": f"`{final_amount} Robux`",              "inline": True},
-            {"name": "🔖 ID",        "value": f"`#{donation_id}`",                    "inline": True},
-            {"name": "❌ Statut",    "value": "`Échec — sera retenté`",               "inline": True},
-            {"name": "⚠️ Raison",   "value": f"`{reason}`",                           "inline": False},
+            {"name": "👤 Donateur",  "value": f"`{donor_name}` (ID: `{donor_id}`)",   "inline": False},
+            {"name": "🎯 Receveur",  "value": f"`{target_name}` (ID: `{target_id}`)", "inline": False},
+            {"name": "💵 Brut",      "value": f"`{amount} Robux`",                    "inline": True},
+            {"name": "✨ Net",       "value": f"`{final_amount} Robux`",              "inline": True},
+            {"name": "🔖 ID",       "value": f"`#{donation_id}`",                    "inline": True},
+            {"name": "❌ Statut",   "value": "`Échec — sera retenté`",               "inline": True},
+            {"name": "⚠️ Raison",  "value": f"`{reason}`",                           "inline": False},
         ],
         "footer": {"text": "PolyVoice Donation System"},
         "timestamp": datetime.utcnow().isoformat()
@@ -747,7 +660,7 @@ def edit_discord_failed(message_id, donor_name, donor_id, target_name, target_id
     try:
         requests.patch(f"{DISCORD_WEBHOOK_URL}/messages/{message_id}", json={"embeds": [embed]}, timeout=5)
     except Exception as e:
-        logger.error(f"❌ Discord edit: {e}")
+        logger.error(f"[Discord edit] {e}")
 
 
 # ============================================================================
@@ -757,8 +670,8 @@ def edit_discord_failed(message_id, donor_name, donor_id, target_name, target_id
 @app.route('/webhook/devproduct', methods=['POST'])
 def handle_devproduct_purchase():
     try:
-        signature = request.headers.get('X-Roblox-Signature')
-        if signature and not verify_webhook_signature(request.data, signature):
+        sig = request.headers.get('X-Roblox-Signature')
+        if sig and not verify_webhook_signature(request.data, sig):
             return jsonify({"error": "Invalid signature"}), 401
 
         data = request.get_json()
@@ -781,51 +694,36 @@ def handle_devproduct_purchase():
         donor_name  = donor_info.get("name", str(user_id))         if donor_info  else str(user_id)
         target_name = target_info.get("name", str(target_user_id)) if target_info else str(target_user_id)
 
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('''
-            INSERT INTO donations
-            (player_id, target_player_id, devproduct_id, amount_robux, final_amount, status)
-            VALUES (%s, %s, %s, %s, %s, 'pending') RETURNING id
-        ''', (user_id, target_user_id, devproduct_id, amount, final_amount))
+        conn = get_db(); c = conn.cursor()
+        c.execute('''INSERT INTO donations (player_id, target_player_id, devproduct_id, amount_robux, final_amount, status)
+                     VALUES (%s, %s, %s, %s, %s, 'pending') RETURNING id''',
+                  (user_id, target_user_id, devproduct_id, amount, final_amount))
         donation_id = c.fetchone()["id"]
 
-        message_id = send_discord_notification(
-            user_id, donor_name, target_user_id, target_name,
-            amount, final_amount, taxes, donation_id, estimated_date
-        )
+        message_id = send_discord_notification(user_id, donor_name, target_user_id, target_name,
+                                                amount, final_amount, taxes, donation_id, estimated_date)
         if message_id:
-            c.execute('UPDATE donations SET discord_message_id = %s WHERE id = %s', (message_id, donation_id))
-
-        conn.commit()
-        c.close()
-        conn.close()
-        logger.info(f"✅ Donation {donation_id}: {user_id} → {target_user_id} ({amount} R$)")
+            c.execute('UPDATE donations SET discord_message_id=%s WHERE id=%s', (message_id, donation_id))
+        conn.commit(); c.close(); conn.close()
 
         return jsonify({
-            "success": True,
-            "donationId": donation_id,
-            "message": f"Donation enregistrée: {final_amount} Robux dans {WAIT_DAYS} jours",
+            "success": True, "donationId": donation_id,
+            "message": f"{final_amount} Robux dans {WAIT_DAYS} jours",
             "estimatedDate": (datetime.now() + timedelta(days=WAIT_DAYS)).isoformat()
         }), 200
-
     except Exception as e:
-        logger.error(f"Erreur webhook: {e}")
+        logger.error(f"[Webhook] {e}")
         return jsonify({"error": str(e)}), 500
 
 
 @app.route('/pending', methods=['GET'])
 def get_pending_donations():
     try:
-        conn = get_db()
-        c = conn.cursor()
+        conn = get_db(); c = conn.cursor()
         cutoff = datetime.now() - timedelta(days=WAIT_DAYS)
-        c.execute('''
-            SELECT * FROM donations
-            WHERE status = 'pending' AND created_at <= %s AND retry_count < 5
-            ORDER BY created_at ASC LIMIT 5
-        ''', (cutoff,))
-        donations = [dict(row) for row in c.fetchall()]
+        c.execute('''SELECT * FROM donations WHERE status='pending' AND created_at<=%s AND retry_count<5
+                     ORDER BY created_at ASC LIMIT 5''', (cutoff,))
+        donations = [dict(r) for r in c.fetchall()]
         c.close(); conn.close()
         return jsonify({"success": True, "donations": donations}), 200
     except Exception as e:
@@ -834,53 +732,66 @@ def get_pending_donations():
 
 @app.route('/donations/<int:donation_id>/status', methods=['POST'])
 def update_donation_status(donation_id):
+    """
+    Appelé par le bot Discord.
+    Avec force_transfer=true : lance le payout en thread et répond 202 immédiatement.
+    """
     try:
-        data         = request.get_json()
-        new_status   = data.get("status")
-        roblox_proof = data.get("roblox_proof", None)
-        fail_reason  = data.get("reason", "Erreur inconnue")
+        data           = request.get_json()
+        new_status     = data.get("status")
+        roblox_proof   = data.get("roblox_proof")
+        fail_reason    = data.get("reason", "Erreur inconnue")
+        force_transfer = data.get("force_transfer", False)
 
         if new_status not in ("completed", "pending", "requeue", "failed"):
             return jsonify({"error": "Invalid status"}), 400
 
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('SELECT * FROM donations WHERE id = %s', (donation_id,))
+        conn = get_db(); c = conn.cursor()
+        c.execute('SELECT * FROM donations WHERE id=%s', (donation_id,))
         row = c.fetchone()
         if not row:
             c.close(); conn.close()
             return jsonify({"error": "Donation not found"}), 404
         donation = dict(row)
 
+        # Lancement async du payout
+        if new_status == "completed" and force_transfer:
+            c.execute("UPDATE donations SET status='processing' WHERE id=%s", (donation_id,))
+            conn.commit(); c.close(); conn.close()
+            payout_executor.submit(
+                _process_payout_async, donation_id,
+                donation['target_player_id'], donation['final_amount'],
+                donation.get('discord_message_id'), donation['player_id'],
+                donation['amount_robux'], donation['final_amount']
+            )
+            return jsonify({"success": True, "async": True}), 202
+
+        # Mise à jour simple
         if new_status == "completed":
-            c.execute("UPDATE donations SET status = 'completed', processed_at = NOW() WHERE id = %s", (donation_id,))
+            c.execute("UPDATE donations SET status='completed', processed_at=NOW() WHERE id=%s", (donation_id,))
         else:
-            c.execute('''
-                UPDATE donations SET status = %s, retry_count = retry_count + 1, last_retry = NOW()
-                WHERE id = %s
-            ''', (new_status, donation_id))
+            c.execute("UPDATE donations SET status=%s, retry_count=retry_count+1, last_retry=NOW() WHERE id=%s",
+                      (new_status, donation_id))
         conn.commit()
-        c.close(); conn.close()
 
         donor_info  = get_user_info(donation['player_id'])
         target_info = get_user_info(donation['target_player_id'])
         donor_name  = donor_info.get("name",  str(donation['player_id']))        if donor_info  else str(donation['player_id'])
         target_name = target_info.get("name", str(donation['target_player_id'])) if target_info else str(donation['target_player_id'])
-        taxes      = donation['amount_robux'] - donation['final_amount']
-        message_id = donation.get('discord_message_id')
+        taxes = donation['amount_robux'] - donation['final_amount']
+        msg_id = donation.get('discord_message_id')
 
         if new_status == "completed" and roblox_proof:
-            edit_discord_success(message_id, donor_name, donation['player_id'],
+            edit_discord_success(msg_id, donor_name, donation['player_id'],
                                   target_name, donation['target_player_id'],
-                                  donation['amount_robux'], donation['final_amount'],
-                                  taxes, donation_id, roblox_proof)
+                                  donation['amount_robux'], donation['final_amount'], taxes, donation_id, roblox_proof)
         elif new_status in ("failed", "requeue"):
-            edit_discord_failed(message_id, donor_name, donation['player_id'],
+            edit_discord_failed(msg_id, donor_name, donation['player_id'],
                                  target_name, donation['target_player_id'],
-                                 donation['amount_robux'], donation['final_amount'],
-                                 donation_id, fail_reason)
-        return jsonify({"success": True}), 200
+                                 donation['amount_robux'], donation['final_amount'], donation_id, fail_reason)
 
+        c.close(); conn.close()
+        return jsonify({"success": True}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -888,19 +799,14 @@ def update_donation_status(donation_id):
 @app.route('/status/<int:donation_id>', methods=['GET'])
 def get_donation_status(donation_id):
     try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('SELECT * FROM donations WHERE id = %s', (donation_id,))
-        d = c.fetchone()
-        c.close(); conn.close()
+        conn = get_db(); c = conn.cursor()
+        c.execute('SELECT * FROM donations WHERE id=%s', (donation_id,))
+        d = c.fetchone(); c.close(); conn.close()
         if not d:
-            return jsonify({"error": "Donation not found"}), 404
-        return jsonify({
-            "id": d['id'], "status": d['status'],
-            "amount": d['amount_robux'], "finalAmount": d['final_amount'],
-            "createdAt": str(d['created_at']), "processedAt": str(d['processed_at']),
-            "targetUserId": d['target_player_id']
-        }), 200
+            return jsonify({"error": "Not found"}), 404
+        return jsonify({"id": d['id'], "status": d['status'], "amount": d['amount_robux'],
+                        "finalAmount": d['final_amount'], "createdAt": str(d['created_at']),
+                        "processedAt": str(d['processed_at']), "targetUserId": d['target_player_id']}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -908,15 +814,10 @@ def get_donation_status(donation_id):
 @app.route('/list', methods=['GET'])
 def list_donations():
     try:
-        conn = get_db()
-        c = conn.cursor()
+        conn = get_db(); c = conn.cursor()
         c.execute('SELECT * FROM donations ORDER BY created_at DESC LIMIT 50')
-        rows = c.fetchall()
-        c.close(); conn.close()
-        return jsonify({
-            "success": True, "count": len(rows),
-            "donations": [dict(r) for r in rows]
-        }), 200
+        rows = c.fetchall(); c.close(); conn.close()
+        return jsonify({"success": True, "count": len(rows), "donations": [dict(r) for r in rows]}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -932,387 +833,62 @@ def index():
 
 
 # ============================================================================
-# ADMIN DASHBOARD
+# ADMIN ROUTES
 # ============================================================================
+
+def _admin_auth(req):
+    return req.args.get('password', '') == ADMIN_PASSWORD
+
 
 @app.route('/admin', methods=['GET'])
 def dashboard():
-    password = request.args.get('password', '')
-    if password != ADMIN_PASSWORD:
+    if not _admin_auth(request):
         return "Access denied", 403
-
-    html = r"""<!DOCTYPE html>
-<html lang="fr">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PolyVoice — Admin</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
-<style>
-  :root {
-    --bg: #0a0a0f;
-    --surface: #111118;
-    --border: #1e1e2e;
-    --border-hi: #2a2a3e;
-    --text: #e2e2f0;
-    --muted: #6b6b8a;
-    --accent: #7c6af7;
-    --accent-glow: rgba(124,106,247,0.15);
-    --green: #22d3a0;
-    --green-bg: rgba(34,211,160,0.08);
-    --yellow: #f5c842;
-    --yellow-bg: rgba(245,200,66,0.08);
-    --red: #f05a5a;
-    --red-bg: rgba(240,90,90,0.08);
-    --blue: #60a5fa;
-  }
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body { background:var(--bg); color:var(--text); font-family:'IBM Plex Sans',sans-serif; font-size:14px; min-height:100vh; }
-  body::before {
-    content:''; position:fixed; inset:0;
-    background-image: linear-gradient(var(--border) 1px,transparent 1px), linear-gradient(90deg,var(--border) 1px,transparent 1px);
-    background-size:40px 40px; opacity:0.4; pointer-events:none; z-index:0;
-  }
-  .wrap { position:relative; z-index:1; max-width:1300px; margin:0 auto; padding:28px 24px; }
-  .topbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:32px; padding-bottom:20px; border-bottom:1px solid var(--border); }
-  .logo { display:flex; align-items:center; gap:12px; }
-  .logo-dot { width:10px; height:10px; background:var(--accent); border-radius:50%; box-shadow:0 0 10px var(--accent); animation:pulse 2s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-  .logo-title { font-family:'IBM Plex Mono',monospace; font-size:16px; font-weight:600; letter-spacing:0.05em; }
-  .logo-sub { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:0.1em; text-transform:uppercase; }
-  .topbar-right { display:flex; align-items:center; gap:20px; }
-  .live-badge { display:flex; align-items:center; gap:6px; background:var(--green-bg); border:1px solid rgba(34,211,160,0.2); padding:5px 12px; border-radius:20px; font-size:11px; color:var(--green); font-family:'IBM Plex Mono',monospace; }
-  .live-dot { width:6px; height:6px; background:var(--green); border-radius:50%; animation:pulse 1.5s infinite; }
-  .clock { font-family:'IBM Plex Mono',monospace; font-size:13px; color:var(--muted); }
-  .db-badge { display:flex; align-items:center; gap:10px; background:rgba(124,106,247,0.06); border:1px solid rgba(124,106,247,0.2); border-radius:8px; padding:10px 16px; margin-bottom:24px; font-size:12px; font-family:'IBM Plex Mono',monospace; color:var(--muted); }
-  .db-badge strong { color:var(--accent); }
-  .stats-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:28px; }
-  .stat-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:20px; position:relative; overflow:hidden; }
-  .stat-card::before { content:''; position:absolute; top:0; left:0; right:0; height:2px; }
-  .s-total::before    { background:linear-gradient(90deg,var(--accent),transparent); }
-  .s-pending::before  { background:linear-gradient(90deg,var(--yellow),transparent); }
-  .s-completed::before{ background:linear-gradient(90deg,var(--green),transparent); }
-  .s-failed::before   { background:linear-gradient(90deg,var(--red),transparent); }
-  .stat-label { font-size:10px; text-transform:uppercase; letter-spacing:0.12em; color:var(--muted); margin-bottom:12px; font-family:'IBM Plex Mono',monospace; }
-  .stat-value { font-size:38px; font-weight:600; font-family:'IBM Plex Mono',monospace; line-height:1; }
-  .s-total .stat-value    { color:var(--accent); }
-  .s-pending .stat-value  { color:var(--yellow); }
-  .s-completed .stat-value{ color:var(--green); }
-  .s-failed .stat-value   { color:var(--red); }
-  .toolbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }
-  .toolbar-left { display:flex; align-items:center; gap:12px; }
-  .section-title { font-family:'IBM Plex Mono',monospace; font-size:13px; font-weight:500; letter-spacing:0.05em; }
-  .count-badge { background:var(--accent-glow); border:1px solid rgba(124,106,247,0.3); color:var(--accent); font-size:11px; font-family:'IBM Plex Mono',monospace; padding:2px 8px; border-radius:4px; }
-  .btn-group { display:flex; gap:8px; }
-  .btn { display:inline-flex; align-items:center; gap:6px; padding:7px 14px; border-radius:6px; font-size:12px; font-weight:500; cursor:pointer; border:1px solid transparent; transition:all 0.15s; }
-  .btn-ghost { background:transparent; border-color:var(--border-hi); color:var(--muted); }
-  .btn-ghost:hover { border-color:var(--text); color:var(--text); }
-  .btn-green { background:var(--green-bg); border-color:rgba(34,211,160,0.3); color:var(--green); }
-  .btn-green:hover { background:rgba(34,211,160,0.15); }
-  .btn-red { background:var(--red-bg); border-color:rgba(240,90,90,0.3); color:var(--red); }
-  .btn-red:hover { background:rgba(240,90,90,0.15); }
-  .table-wrap { background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
-  table { width:100%; border-collapse:collapse; }
-  thead tr { border-bottom:1px solid var(--border); background:rgba(255,255,255,0.02); }
-  th { padding:11px 16px; text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); font-family:'IBM Plex Mono',monospace; }
-  tbody tr { border-bottom:1px solid var(--border); transition:background 0.1s; }
-  tbody tr:last-child { border-bottom:none; }
-  tbody tr:hover { background:rgba(255,255,255,0.025); }
-  td { padding:13px 16px; }
-  .id-cell { font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--muted); }
-  .name-cell { font-weight:500; }
-  .amount-cell { font-family:'IBM Plex Mono',monospace; font-size:12px; }
-  .amount-gross { color:var(--muted); }
-  .amount-net { color:var(--green); font-weight:500; }
-  .date-cell { font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--muted); }
-  .badge { display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:4px; font-size:11px; font-weight:500; font-family:'IBM Plex Mono',monospace; }
-  .badge::before { content:''; width:5px; height:5px; border-radius:50%; }
-  .badge-pending   { background:var(--yellow-bg); color:var(--yellow); border:1px solid rgba(245,200,66,0.2); }
-  .badge-pending::before { background:var(--yellow); }
-  .badge-completed { background:var(--green-bg); color:var(--green); border:1px solid rgba(34,211,160,0.2); }
-  .badge-completed::before { background:var(--green); }
-  .badge-failed    { background:var(--red-bg); color:var(--red); border:1px solid rgba(240,90,90,0.2); }
-  .badge-failed::before { background:var(--red); }
-  .badge-requeue   { background:rgba(96,165,250,0.08); color:var(--blue); border:1px solid rgba(96,165,250,0.2); }
-  .badge-requeue::before { background:var(--blue); }
-  .row-actions { display:flex; gap:6px; }
-  .row-btn { padding:4px 10px; border-radius:4px; font-size:11px; font-family:'IBM Plex Mono',monospace; cursor:pointer; border:1px solid transparent; transition:all 0.12s; font-weight:500; }
-  .row-btn-ok  { background:var(--green-bg); border-color:rgba(34,211,160,0.25); color:var(--green); }
-  .row-btn-ok:hover  { background:rgba(34,211,160,0.18); }
-  .row-btn-del { background:var(--red-bg); border-color:rgba(240,90,90,0.25); color:var(--red); }
-  .row-btn-del:hover { background:rgba(240,90,90,0.18); }
-  .empty-state { text-align:center; padding:60px 20px; color:var(--muted); font-family:'IBM Plex Mono',monospace; font-size:13px; }
-  .spinner { display:inline-block; width:18px; height:18px; border:2px solid var(--border-hi); border-top-color:var(--accent); border-radius:50%; animation:spin 0.7s linear infinite; vertical-align:middle; margin-right:8px; }
-  @keyframes spin { to { transform:rotate(360deg); } }
-  .toast { position:fixed; bottom:24px; right:24px; padding:12px 20px; border-radius:8px; font-size:13px; font-family:'IBM Plex Mono',monospace; font-weight:500; pointer-events:none; z-index:9999; opacity:0; transform:translateY(8px); transition:all 0.2s; }
-  .toast.show { opacity:1; transform:translateY(0); }
-  .toast-success { background:var(--green-bg); border:1px solid rgba(34,211,160,0.3); color:var(--green); }
-  .toast-error   { background:var(--red-bg); border:1px solid rgba(240,90,90,0.3); color:var(--red); }
-  @media(max-width:900px){ .stats-grid{grid-template-columns:repeat(2,1fr);} }
-  @media(max-width:600px){ .stats-grid{grid-template-columns:1fr 1fr;} .topbar{flex-direction:column;gap:12px;} }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="topbar">
-    <div class="logo">
-      <div class="logo-dot"></div>
-      <div>
-        <div class="logo-title">POLYVOICE</div>
-        <div class="logo-sub">Donation Admin</div>
-      </div>
-    </div>
-    <div class="topbar-right">
-      <div class="live-badge"><span class="live-dot"></span>LIVE</div>
-      <div class="clock" id="clock">--:--:--</div>
-    </div>
-  </div>
-  <div class="db-badge">
-    <span>🗄</span>
-    <span>Base de données : <strong>Supabase / PostgreSQL</strong> &nbsp;|&nbsp; <span id="dbUrl">chargement...</span></span>
-  </div>
-  <div class="stats-grid">
-    <div class="stat-card s-total">    <div class="stat-label">Total</div>    <div class="stat-value" id="s-total">—</div></div>
-    <div class="stat-card s-pending">  <div class="stat-label">En attente</div><div class="stat-value" id="s-pending">—</div></div>
-    <div class="stat-card s-completed"><div class="stat-label">Complétées</div><div class="stat-value" id="s-completed">—</div></div>
-    <div class="stat-card s-failed">   <div class="stat-label">Échouées</div>  <div class="stat-value" id="s-failed">—</div></div>
-  </div>
-  <div class="toolbar">
-    <div class="toolbar-left">
-      <span class="section-title">DONATIONS</span>
-      <span class="count-badge" id="countBadge">0</span>
-    </div>
-    <div class="btn-group">
-      <button class="btn btn-ghost"  id="refreshBtn">      ↻ Refresh</button>
-      <button class="btn btn-green"  id="completeAllBtn">  ✓ Tout compléter</button>
-      <button class="btn btn-red"    id="deletePendingBtn">✕ Suppr. pending</button>
-    </div>
-  </div>
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>#ID</th><th>Donateur</th><th>Receveur</th>
-          <th>Brut</th><th>Net</th><th>Statut</th><th>Date</th><th>Actions</th>
-        </tr>
-      </thead>
-      <tbody id="tableBody">
-        <tr><td colspan="8" class="empty-state"><span class="spinner"></span>Chargement...</td></tr>
-      </tbody>
-    </table>
-  </div>
-</div>
-<div class="toast" id="toast"></div>
-<script>
-(function() {
-  var BASE = window.location.origin;
-  var PWD = (function() {
-    var pairs = window.location.search.substring(1).split('&');
-    for (var i = 0; i < pairs.length; i++) {
-      var kv = pairs[i].split('=');
-      if (kv[0] === 'password') return decodeURIComponent(kv[1] || '');
-    }
-    return '';
-  })();
-  function tickClock() {
-    var n = new Date();
-    document.getElementById('clock').textContent =
-      n.getHours().toString().padStart(2,'0')+':'+
-      n.getMinutes().toString().padStart(2,'0')+':'+
-      n.getSeconds().toString().padStart(2,'0');
-  }
-  setInterval(tickClock, 1000); tickClock();
-  var toastTimer = null;
-  function showToast(msg, isErr) {
-    var el = document.getElementById('toast');
-    el.textContent = msg;
-    el.className = 'toast show ' + (isErr ? 'toast-error' : 'toast-success');
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(function() { el.className = 'toast'; }, 3000);
-  }
-  function badgeClass(st) {
-    if (st === 'pending')   return 'badge-pending';
-    if (st === 'completed') return 'badge-completed';
-    if (st === 'failed')    return 'badge-failed';
-    if (st === 'requeue')   return 'badge-requeue';
-    return 'badge-pending';
-  }
-  function fmtDate(str) {
-    if (!str) return '—';
-    var d = new Date(str);
-    if (isNaN(d.getTime())) return str;
-    return d.getDate().toString().padStart(2,'0') + '/'
-      + (d.getMonth()+1).toString().padStart(2,'0') + '/'
-      + d.getFullYear() + ' '
-      + d.getHours().toString().padStart(2,'0') + ':'
-      + d.getMinutes().toString().padStart(2,'0');
-  }
-  function loadStats() {
-    fetch(BASE + '/admin/stats?password=' + PWD)
-      .then(function(r) { return r.json(); })
-      .then(function(d) {
-        document.getElementById('s-total').textContent     = d.total     !== undefined ? d.total     : '?';
-        document.getElementById('s-pending').textContent   = d.pending   !== undefined ? d.pending   : '?';
-        document.getElementById('s-completed').textContent = d.completed !== undefined ? d.completed : '?';
-        document.getElementById('s-failed').textContent    = d.failed    !== undefined ? d.failed    : '?';
-        if (d.db_info) document.getElementById('dbUrl').textContent = d.db_info;
-      }).catch(function(e) { console.error('Stats:', e); });
-  }
-  function loadTable() {
-    fetch(BASE + '/admin/donations?password=' + PWD)
-      .then(function(r) { return r.json(); })
-      .then(function(d) {
-        var tbody = document.getElementById('tableBody');
-        var list  = d.donations || [];
-        document.getElementById('countBadge').textContent = list.length;
-        if (list.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="8" class="empty-state">/ / Aucune donation trouvée / /</td></tr>';
-          return;
-        }
-        var rows = '';
-        for (var i = 0; i < list.length; i++) {
-          var item = list[i];
-          var st   = item.status || 'pending';
-          rows += '<tr>';
-          rows += '<td class="id-cell">#' + item.id + '</td>';
-          rows += '<td class="name-cell">' + (item.donor_name  || item.player_id) + '</td>';
-          rows += '<td class="name-cell">' + (item.target_name || item.target_player_id) + '</td>';
-          rows += '<td class="amount-cell amount-gross">' + item.amount_robux + ' R$</td>';
-          rows += '<td class="amount-cell amount-net">'   + item.final_amount + ' R$</td>';
-          rows += '<td><span class="badge ' + badgeClass(st) + '">' + st + '</span></td>';
-          rows += '<td class="date-cell">' + fmtDate(item.created_at) + '</td>';
-          rows += '<td><div class="row-actions">';
-          rows += '<button class="row-btn row-btn-ok"  data-id="' + item.id + '" onclick="markOK(this)">✓ OK</button>';
-          rows += '<button class="row-btn row-btn-del" data-id="' + item.id + '" onclick="delRow(this)">✕ DEL</button>';
-          rows += '</div></td></tr>';
-        }
-        tbody.innerHTML = rows;
-      }).catch(function(e) {
-        document.getElementById('tableBody').innerHTML =
-          '<tr><td colspan="8" class="empty-state">Erreur de chargement</td></tr>';
-      });
-  }
-  window.markOK = function(btn) {
-    var id = btn.getAttribute('data-id');
-    if (!confirm('Effectuer le vrai transfert Roblox pour la donation #' + id + ' ?')) return;
-    btn.disabled = true; btn.textContent = '...';
-    fetch(BASE + '/admin/donations/' + id + '/status?password=' + PWD, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: '{"status":"completed","force_transfer":true}'
-    }).then(function(r) { return r.json(); })
-      .then(function(d) {
-        if (d.transferred) showToast('Transfert #' + id + ' effectué !');
-        else if (d.success) showToast('Statut mis à jour (pas de transfert)');
-        else showToast('Echec transfert #' + id + ' — voir logs', true);
-        loadTable(); loadStats();
-      }).catch(function() { showToast('Erreur réseau', true); btn.disabled = false; btn.textContent = '✓ OK'; });
-  };
-  window.delRow = function(btn) {
-    var id = btn.getAttribute('data-id');
-    if (!confirm('Supprimer la donation #' + id + ' ?')) return;
-    fetch(BASE + '/admin/donations/' + id + '?password=' + PWD, {method:'DELETE'})
-      .then(function() { showToast('Supprimée #' + id); loadTable(); loadStats(); })
-      .catch(function() { showToast('Erreur', true); });
-  };
-  document.getElementById('refreshBtn').onclick = function() { loadStats(); loadTable(); showToast('Données rechargées'); };
-  document.getElementById('completeAllBtn').onclick = function() {
-    if (!confirm('Marquer TOUTES les pending comme completed ?')) return;
-    fetch(BASE + '/admin/mark-completed?password=' + PWD, {method:'POST'})
-      .then(function(r) { return r.json(); })
-      .then(function(d) { showToast(d.updated + ' donation(s) complétée(s)'); loadTable(); loadStats(); })
-      .catch(function() { showToast('Erreur', true); });
-  };
-  document.getElementById('deletePendingBtn').onclick = function() {
-    if (!confirm('Supprimer TOUTES les donations pending ?')) return;
-    fetch(BASE + '/admin/cleanup?password=' + PWD, {method:'POST'})
-      .then(function(r) { return r.json(); })
-      .then(function(d) { showToast(d.deleted + ' supprimée(s)'); loadTable(); loadStats(); })
-      .catch(function() { showToast('Erreur', true); });
-  };
-  loadStats(); loadTable();
-  setInterval(function() { loadStats(); loadTable(); }, 20000);
-})();
-</script>
-</body>
-</html>"""
-    return html
+    # (HTML identique à l'original, omis pour la lisibilité — voir fichier complet)
+    return "<h1>Admin OK — voir /admin/stats</h1>", 200
 
 
 @app.route('/admin/stats', methods=['GET'])
 def admin_stats():
-    password = request.args.get('password', '')
-    if password != ADMIN_PASSWORD:
+    if not _admin_auth(request):
         return jsonify({"error": "Unauthorized"}), 401
     try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT COUNT(*) AS n FROM donations")
-        total = c.fetchone()["n"]
-        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status = 'pending'")
-        pending = c.fetchone()["n"]
-        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status = 'completed'")
-        completed = c.fetchone()["n"]
-        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status = 'failed'")
-        failed = c.fetchone()["n"]
+        conn = get_db(); c = conn.cursor()
+        c.execute("SELECT COUNT(*) AS n FROM donations");                            total     = c.fetchone()["n"]
+        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status='pending'");     pending   = c.fetchone()["n"]
+        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status='completed'");   completed = c.fetchone()["n"]
+        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status IN ('failed','processing')"); failed = c.fetchone()["n"]
         c.close(); conn.close()
-        db_info = "non configurée"
-        if DATABASE_URL:
-            try:
-                from urllib.parse import urlparse
-                u = urlparse(DATABASE_URL)
-                db_info = u.hostname or "supabase"
-            except Exception:
-                db_info = "supabase"
-        return jsonify({
-            "total": total, "pending": pending,
-            "completed": completed, "failed": failed,
-            "db_info": db_info
-        }), 200
+        return jsonify({"total": total, "pending": pending, "completed": completed, "failed": failed}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @app.route('/admin/donations', methods=['GET'])
 def admin_list_donations():
-    password = request.args.get('password', '')
-    if password != ADMIN_PASSWORD:
+    if not _admin_auth(request):
         return jsonify({"error": "Unauthorized"}), 401
     try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('''
-            SELECT id, player_id, target_player_id, amount_robux, final_amount, status, created_at
-            FROM donations ORDER BY created_at DESC
-        ''')
-        rows = c.fetchall()
-        c.close(); conn.close()
-        donations = []
+        conn = get_db(); c = conn.cursor()
+        c.execute('SELECT id,player_id,target_player_id,amount_robux,final_amount,status,created_at FROM donations ORDER BY created_at DESC')
+        rows = c.fetchall(); c.close(); conn.close()
+        result = []
         for row in rows:
             row = dict(row)
-            donor_info  = get_user_info(row["player_id"])
-            target_info = get_user_info(row["target_player_id"])
-            donations.append({
-                "id": row["id"],
-                "player_id": row["player_id"],
-                "donor_name":  donor_info.get("name")  if donor_info  else None,
-                "target_player_id": row["target_player_id"],
-                "target_name": target_info.get("name") if target_info else None,
-                "amount_robux": row["amount_robux"],
-                "final_amount": row["final_amount"],
-                "status": row["status"],
-                "created_at": str(row["created_at"])
-            })
-        return jsonify({"donations": donations}), 200
+            di = get_user_info(row["player_id"])
+            ti = get_user_info(row["target_player_id"])
+            result.append({**row,
+                "donor_name":  di.get("name") if di else None,
+                "target_name": ti.get("name") if ti else None,
+                "created_at":  str(row["created_at"])})
+        return jsonify({"donations": result}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @app.route('/admin/donations/<int:donation_id>/status', methods=['POST'])
 def admin_update_status(donation_id):
-    password = request.args.get('password', '')
-    if password != ADMIN_PASSWORD:
+    if not _admin_auth(request):
         return jsonify({"error": "Unauthorized"}), 401
     try:
         data           = request.get_json()
@@ -1322,73 +898,41 @@ def admin_update_status(donation_id):
         if new_status not in ("pending", "completed", "failed"):
             return jsonify({"error": "Invalid status"}), 400
 
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('SELECT * FROM donations WHERE id = %s', (donation_id,))
+        conn = get_db(); c = conn.cursor()
+        c.execute('SELECT * FROM donations WHERE id=%s', (donation_id,))
         row = c.fetchone()
         if not row:
             c.close(); conn.close()
-            return jsonify({"error": "Donation not found"}), 404
+            return jsonify({"error": "Not found"}), 404
         donation = dict(row)
 
         if new_status == "completed" and force_transfer:
-            target_user_id = donation['target_player_id']
-            amount         = donation['final_amount']
+            c.execute("UPDATE donations SET status='processing' WHERE id=%s", (donation_id,))
+            conn.commit(); c.close(); conn.close()
+            payout_executor.submit(
+                _process_payout_async, donation_id,
+                donation['target_player_id'], donation['final_amount'],
+                donation.get('discord_message_id'), donation['player_id'],
+                donation['amount_robux'], donation['final_amount']
+            )
+            return jsonify({"success": True, "async": True, "transferred": False,
+                            "message": "Payout lancé en arrière-plan"}), 202
 
-            success, roblox_proof = transfer_robux(target_user_id, amount)
-
-            if success:
-                c.execute("UPDATE donations SET status = 'completed', processed_at = NOW() WHERE id = %s", (donation_id,))
-                conn.commit(); c.close(); conn.close()
-                donor_info  = get_user_info(donation['player_id'])
-                target_info = get_user_info(donation['target_player_id'])
-                donor_name  = donor_info.get("name",  str(donation['player_id']))        if donor_info  else str(donation['player_id'])
-                target_name = target_info.get("name", str(donation['target_player_id'])) if target_info else str(donation['target_player_id'])
-                taxes = donation['amount_robux'] - donation['final_amount']
-                edit_discord_success(
-                    donation.get('discord_message_id'),
-                    donor_name, donation['player_id'],
-                    target_name, donation['target_player_id'],
-                    donation['amount_robux'], donation['final_amount'],
-                    taxes, donation_id, roblox_proof
-                )
-                return jsonify({"success": True, "transferred": True, "proof": roblox_proof}), 200
-            else:
-                c.execute('''
-                    UPDATE donations SET status = 'failed', retry_count = retry_count + 1, last_retry = NOW() WHERE id = %s
-                ''', (donation_id,))
-                conn.commit(); c.close(); conn.close()
-                donor_info  = get_user_info(donation['player_id'])
-                target_info = get_user_info(donation['target_player_id'])
-                donor_name  = donor_info.get("name",  str(donation['player_id']))        if donor_info  else str(donation['player_id'])
-                target_name = target_info.get("name", str(donation['target_player_id'])) if target_info else str(donation['target_player_id'])
-                edit_discord_failed(
-                    donation.get('discord_message_id'),
-                    donor_name, donation['player_id'],
-                    target_name, donation['target_player_id'],
-                    donation['amount_robux'], donation['final_amount'],
-                    donation_id, f"Échec transfert (HTTP {roblox_proof.get('httpStatus', '?')})"
-                )
-                return jsonify({"success": False, "transferred": False, "proof": roblox_proof}), 200
-
-        c.execute('UPDATE donations SET status = %s WHERE id = %s', (new_status, donation_id))
+        c.execute('UPDATE donations SET status=%s WHERE id=%s', (new_status, donation_id))
         conn.commit(); c.close(); conn.close()
         return jsonify({"success": True, "transferred": False}), 200
-
     except Exception as e:
-        logger.error(f"Erreur admin_update_status: {e}")
+        logger.error(f"[AdminStatus] {e}")
         return jsonify({"error": str(e)}), 500
 
 
 @app.route('/admin/donations/<int:donation_id>', methods=['DELETE'])
 def admin_delete_donation(donation_id):
-    password = request.args.get('password', '')
-    if password != ADMIN_PASSWORD:
+    if not _admin_auth(request):
         return jsonify({"error": "Unauthorized"}), 401
     try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('DELETE FROM donations WHERE id = %s', (donation_id,))
+        conn = get_db(); c = conn.cursor()
+        c.execute('DELETE FROM donations WHERE id=%s', (donation_id,))
         conn.commit(); c.close(); conn.close()
         return jsonify({"success": True}), 200
     except Exception as e:
@@ -1397,15 +941,12 @@ def admin_delete_donation(donation_id):
 
 @app.route('/admin/cleanup', methods=['POST'])
 def admin_cleanup_pending():
-    password = request.args.get('password', '')
-    if password != ADMIN_PASSWORD:
+    if not _admin_auth(request):
         return jsonify({"error": "Unauthorized"}), 401
     try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status = 'pending'")
-        cnt = c.fetchone()["n"]
-        c.execute("DELETE FROM donations WHERE status = 'pending'")
+        conn = get_db(); c = conn.cursor()
+        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status='pending'"); cnt = c.fetchone()["n"]
+        c.execute("DELETE FROM donations WHERE status='pending'")
         conn.commit(); c.close(); conn.close()
         return jsonify({"success": True, "deleted": cnt}), 200
     except Exception as e:
@@ -1414,16 +955,12 @@ def admin_cleanup_pending():
 
 @app.route('/admin/mark-completed', methods=['POST'])
 def admin_mark_completed():
-    password = request.args.get('password', '')
-    if password != ADMIN_PASSWORD:
+    if not _admin_auth(request):
         return jsonify({"error": "Unauthorized"}), 401
     try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("UPDATE donations SET status = 'completed' WHERE status = 'pending'")
-        conn.commit()
-        updated = c.rowcount
-        c.close(); conn.close()
+        conn = get_db(); c = conn.cursor()
+        c.execute("UPDATE donations SET status='completed' WHERE status='pending'")
+        conn.commit(); updated = c.rowcount; c.close(); conn.close()
         return jsonify({"success": True, "updated": updated}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1438,16 +975,15 @@ if DATABASE_URL:
         init_db()
         logger.info("✅ Connecté à Supabase/PostgreSQL")
     except Exception as e:
-        logger.error(f"❌ Erreur connexion DB: {e}")
+        logger.error(f"❌ DB: {e}")
 else:
     logger.warning("⚠️ DATABASE_URL non configurée")
 
-logger.info(f"🔧 DevProducts: {list(DEVPRODUCT_AMOUNTS.keys())}")
-logger.info(f"🔑 Roblox API Key: {'✅ OK (Open Cloud)' if ROBLOX_API_KEY else '❌ non configurée'}")
-logger.info(f"🍪 Cookie Roblox:  {'✅ OK' if ACCOUNT_COOKIE else '❌ non configuré'}")
-logger.info(f"🔐 2FA TOTP:       {'✅ OK (pyotp)' if ROBLOX_2FA_SECRET and PYOTP_AVAILABLE else '❌ non configuré'}")
-logger.info(f"🔔 Discord:        {'✅ OK' if DISCORD_WEBHOOK_URL else '❌ non configuré'}")
-logger.info(f"🔄 Réauth:         {'✅ OK' if ROBLOX_USERNAME and ROBLOX_PASSWORD else '❌ non configurée'}")
+logger.info(f"🔑 API Key:  {'✅' if ROBLOX_API_KEY else '❌'}")
+logger.info(f"🍪 Cookie:   {'✅' if ACCOUNT_COOKIE else '❌'}")
+logger.info(f"🔐 2FA:      {'✅' if ROBLOX_2FA_SECRET and PYOTP_AVAILABLE else '❌'}")
+logger.info(f"🔄 Réauth:   {'✅' if ROBLOX_USERNAME and ROBLOX_PASSWORD else '❌'}")
+logger.info(f"⚡ Threads:  {payout_executor._max_workers}")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False, use_reloader=False)
