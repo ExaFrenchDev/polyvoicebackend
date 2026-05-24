@@ -19,6 +19,7 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 GROUP_ID = int(os.getenv("GROUP_ID", "0"))
 ACCOUNT_COOKIE = os.getenv("ROBLOX_ACCOUNT_COOKIE", "")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 DATABASE_PATH = "donations.db"
 
 logging.basicConfig(level=logging.INFO)
@@ -523,6 +524,555 @@ def index():
             "list": "/list (GET)", "health": "/health (GET)"
         }
     }), 200
+
+@app.route('/admin', methods=['GET'])
+def dashboard():
+    """Dashboard HTML pour gérer les donations"""
+    password = request.args.get('password', '')
+    if password != ADMIN_PASSWORD:
+        return "❌ Accès refusé", 403
+    
+    html = """
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>🎯 Admin Donations</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            
+            body {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                padding: 20px;
+            }
+            
+            .container {
+                max-width: 1200px;
+                margin: 0 auto;
+                background: white;
+                border-radius: 20px;
+                padding: 40px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            }
+            
+            h1 {
+                color: #333;
+                margin-bottom: 30px;
+                font-size: 2.5em;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+            }
+            
+            .stats {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 20px;
+                margin-bottom: 40px;
+            }
+            
+            .stat-card {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 20px;
+                border-radius: 15px;
+                text-align: center;
+            }
+            
+            .stat-number {
+                font-size: 2em;
+                font-weight: bold;
+                margin-bottom: 10px;
+            }
+            
+            .stat-label {
+                font-size: 0.9em;
+                opacity: 0.9;
+            }
+            
+            .controls {
+                display: flex;
+                gap: 10px;
+                margin-bottom: 30px;
+                flex-wrap: wrap;
+            }
+            
+            button {
+                padding: 12px 24px;
+                border: none;
+                border-radius: 10px;
+                cursor: pointer;
+                font-size: 1em;
+                font-weight: 600;
+                transition: all 0.3s ease;
+            }
+            
+            .btn-primary {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+            }
+            
+            .btn-primary:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+            }
+            
+            .btn-danger {
+                background: #ff6b6b;
+                color: white;
+            }
+            
+            .btn-danger:hover {
+                background: #ff5252;
+                transform: translateY(-2px);
+            }
+            
+            .btn-success {
+                background: #51cf66;
+                color: white;
+            }
+            
+            .btn-success:hover {
+                background: #40c057;
+            }
+            
+            .table-container {
+                overflow-x: auto;
+            }
+            
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 20px;
+            }
+            
+            th {
+                background: #f8f9fa;
+                padding: 15px;
+                text-align: left;
+                font-weight: 600;
+                color: #333;
+                border-bottom: 2px solid #dee2e6;
+            }
+            
+            td {
+                padding: 15px;
+                border-bottom: 1px solid #dee2e6;
+            }
+            
+            tr:hover {
+                background: #f8f9fa;
+            }
+            
+            .status-badge {
+                display: inline-block;
+                padding: 6px 12px;
+                border-radius: 20px;
+                font-size: 0.85em;
+                font-weight: 600;
+            }
+            
+            .status-pending {
+                background: #ffd43b;
+                color: #333;
+            }
+            
+            .status-completed {
+                background: #51cf66;
+                color: white;
+            }
+            
+            .status-failed {
+                background: #ff6b6b;
+                color: white;
+            }
+            
+            .actions {
+                display: flex;
+                gap: 8px;
+            }
+            
+            .actions button {
+                padding: 6px 12px;
+                font-size: 0.85em;
+            }
+            
+            .loading {
+                text-align: center;
+                padding: 40px;
+                color: #667eea;
+                font-size: 1.2em;
+            }
+            
+            .message {
+                padding: 15px;
+                border-radius: 10px;
+                margin-bottom: 20px;
+                display: none;
+            }
+            
+            .message.show {
+                display: block;
+            }
+            
+            .message.success {
+                background: #d3f9d8;
+                color: #2f5233;
+                border-left: 4px solid #51cf66;
+            }
+            
+            .message.error {
+                background: #ffe3e3;
+                color: #5c0a0a;
+                border-left: 4px solid #ff6b6b;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>💰 Admin Donations Dashboard</h1>
+            
+            <div id="message" class="message"></div>
+            
+            <div class="stats" id="stats">
+                <div class="loading">Chargement des statistiques...</div>
+            </div>
+            
+            <div class="controls">
+                <button class="btn-primary" onclick="loadDonations()">🔄 Rafraîchir</button>
+                <button class="btn-success" onclick="showMarkAllCompleted()">✅ Marquer tous en completed</button>
+                <button class="btn-danger" onclick="showDeleteAllPending()">🗑️ Supprimer tous les pending</button>
+            </div>
+            
+            <div class="table-container">
+                <table id="donationTable">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Donateur</th>
+                            <th>Receveur</th>
+                            <th>Montant</th>
+                            <th>Montant Final</th>
+                            <th>Statut</th>
+                            <th>Créée</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="donationBody">
+                        <tr><td colspan="8" style="text-align:center; padding:40px;">Chargement...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <script>
+            const API_BASE = window.location.origin;
+            const PASSWORD = new URLSearchParams(window.location.search).get('password');
+            
+            function showMessage(text, type = 'success') {
+                const el = document.getElementById('message');
+                el.textContent = text;
+                el.className = `message show ${type}`;
+                setTimeout(() => el.classList.remove('show'), 3000);
+            }
+            
+            function loadStats() {
+                fetch(`${API_BASE}/admin/stats?password=${PASSWORD}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        const statsHtml = `
+                            <div class="stat-card">
+                                <div class="stat-number">${data.total}</div>
+                                <div class="stat-label">Total</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-number" style="color: #ffd43b;">${data.pending}</div>
+                                <div class="stat-label">En attente</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-number" style="color: #51cf66;">${data.completed}</div>
+                                <div class="stat-label">Complétées</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-number" style="color: #ff6b6b;">${data.failed}</div>
+                                <div class="stat-label">Échouées</div>
+                            </div>
+                        `;
+                        document.getElementById('stats').innerHTML = statsHtml;
+                    });
+            }
+            
+            function loadDonations() {
+                fetch(`${API_BASE}/admin/donations?password=${PASSWORD}`)
+                    .then(r => r.json())
+                    .then(data => {
+                        const tbody = document.getElementById('donationBody');
+                        if (data.donations.length === 0) {
+                            tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;">Aucune donation</td></tr>';
+                            return;
+                        }
+                        
+                        tbody.innerHTML = data.donations.map(d => `
+                            <tr>
+                                <td>#${d.id}</td>
+                                <td>${d.donor_name || d.player_id}</td>
+                                <td>${d.target_name || d.target_player_id}</td>
+                                <td>${d.amount_robux}R$</td>
+                                <td>${d.final_amount}R$</td>
+                                <td><span class="status-badge status-${d.status}">${d.status.toUpperCase()}</span></td>
+                                <td>${new Date(d.created_at).toLocaleDateString('fr-FR')}</td>
+                                <td>
+                                    <div class="actions">
+                                        <button class="btn-success" onclick="updateStatus(${d.id}, 'completed')">✅</button>
+                                        <button class="btn-danger" onclick="deleteDonation(${d.id})">🗑️</button>
+                                    </div>
+                                </td>
+                            </tr>
+                        `).join('');
+                    });
+            }
+            
+            function updateStatus(id, status) {
+                fetch(`${API_BASE}/admin/donations/${id}/status?password=${PASSWORD}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status })
+                })
+                .then(r => r.json())
+                .then(() => {
+                    showMessage(`✅ Donation #${id} → ${status}`);
+                    loadDonations();
+                    loadStats();
+                });
+            }
+            
+            function deleteDonation(id) {
+                if (confirm(`Supprimer la donation #${id}?`)) {
+                    fetch(`${API_BASE}/admin/donations/${id}?password=${PASSWORD}`, { method: 'DELETE' })
+                        .then(r => r.json())
+                        .then(() => {
+                            showMessage(`🗑️ Donation #${id} supprimée`);
+                            loadDonations();
+                            loadStats();
+                        });
+                }
+            }
+            
+            function showDeleteAllPending() {
+                if (confirm('⚠️ Supprimer TOUTES les donations en pending?')) {
+                    fetch(`${API_BASE}/admin/cleanup?password=${PASSWORD}`, { method: 'POST' })
+                        .then(r => r.json())
+                        .then(data => {
+                            showMessage(`🗑️ ${data.deleted} donations supprimées!`, 'success');
+                            loadDonations();
+                            loadStats();
+                        });
+                }
+            }
+            
+            function showMarkAllCompleted() {
+                if (confirm('Marquer tous les pending en completed?')) {
+                    fetch(`${API_BASE}/admin/mark-completed?password=${PASSWORD}`, { method: 'POST' })
+                        .then(r => r.json())
+                        .then(data => {
+                            showMessage(`✅ ${data.updated} donations marquées completed!`, 'success');
+                            loadDonations();
+                            loadStats();
+                        });
+                }
+            }
+            
+            // Charger au démarrage
+            loadStats();
+            loadDonations();
+            
+            // Rafraîchir toutes les 10 secondes
+            setInterval(() => {
+                loadStats();
+                loadDonations();
+            }, 10000);
+        </script>
+    </body>
+    </html>
+    """
+    return html
+ 
+ 
+@app.route('/admin/stats', methods=['GET'])
+def admin_stats():
+    """Récupère les stats de donations"""
+    password = request.args.get('password', '')
+    if password != ADMIN_PASSWORD:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        c.execute("SELECT COUNT(*) FROM donations")
+        total = c.fetchone()[0]
+        
+        c.execute("SELECT COUNT(*) FROM donations WHERE status = 'pending'")
+        pending = c.fetchone()[0]
+        
+        c.execute("SELECT COUNT(*) FROM donations WHERE status = 'completed'")
+        completed = c.fetchone()[0]
+        
+        c.execute("SELECT COUNT(*) FROM donations WHERE status = 'failed'")
+        failed = c.fetchone()[0]
+        
+        conn.close()
+        
+        return jsonify({
+            "total": total,
+            "pending": pending,
+            "completed": completed,
+            "failed": failed
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+ 
+ 
+@app.route('/admin/donations', methods=['GET'])
+def admin_list_donations():
+    """Liste toutes les donations avec infos du donateur"""
+    password = request.args.get('password', '')
+    if password != ADMIN_PASSWORD:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        c.execute('''
+            SELECT id, player_id, target_player_id, amount_robux, final_amount, status, created_at 
+            FROM donations 
+            ORDER BY created_at DESC
+        ''')
+        
+        donations = []
+        for row in c.fetchall():
+            donor_info = get_user_info(row[1])
+            target_info = get_user_info(row[2])
+            
+            donations.append({
+                "id": row[0],
+                "player_id": row[1],
+                "donor_name": donor_info.get("name") if donor_info else None,
+                "target_player_id": row[2],
+                "target_name": target_info.get("name") if target_info else None,
+                "amount_robux": row[3],
+                "final_amount": row[4],
+                "status": row[5],
+                "created_at": row[6]
+            })
+        
+        conn.close()
+        
+        return jsonify({"donations": donations}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+ 
+ 
+@app.route('/admin/donations/<int:donation_id>/status', methods=['POST'])
+def admin_update_status(donation_id):
+    """Met à jour le statut d'une donation"""
+    password = request.args.get('password', '')
+    if password != ADMIN_PASSWORD:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        data = request.get_json()
+        new_status = data.get("status")
+        
+        if new_status not in ("pending", "completed", "failed"):
+            return jsonify({"error": "Invalid status"}), 400
+        
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('UPDATE donations SET status = ? WHERE id = ?', (new_status, donation_id))
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"✅ Donation {donation_id} → {new_status}")
+        return jsonify({"success": True}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+ 
+ 
+@app.route('/admin/donations/<int:donation_id>', methods=['DELETE'])
+def admin_delete_donation(donation_id):
+    """Supprime une donation"""
+    password = request.args.get('password', '')
+    if password != ADMIN_PASSWORD:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('DELETE FROM donations WHERE id = ?', (donation_id,))
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"🗑️ Donation {donation_id} supprimée")
+        return jsonify({"success": True}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+ 
+ 
+@app.route('/admin/cleanup', methods=['POST'])
+def admin_cleanup_pending():
+    """Supprime toutes les donations pending"""
+    password = request.args.get('password', '')
+    if password != ADMIN_PASSWORD:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        c.execute("SELECT COUNT(*) FROM donations WHERE status = 'pending'")
+        deleted_count = c.fetchone()[0]
+        
+        c.execute("DELETE FROM donations WHERE status = 'pending'")
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"🧹 {deleted_count} donations pending supprimées")
+        return jsonify({"success": True, "deleted": deleted_count}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+ 
+ 
+@app.route('/admin/mark-completed', methods=['POST'])
+def admin_mark_completed():
+    """Marque tous les pending en completed"""
+    password = request.args.get('password', '')
+    if password != ADMIN_PASSWORD:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        c.execute("UPDATE donations SET status = 'completed' WHERE status = 'pending'")
+        conn.commit()
+        
+        updated = c.rowcount
+        conn.close()
+        
+        logger.info(f"✅ {updated} donations marquées completed")
+        return jsonify({"success": True, "updated": updated}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+ 
 
 
 # ============================================================================
