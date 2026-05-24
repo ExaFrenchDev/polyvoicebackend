@@ -22,7 +22,6 @@ DATABASE_PATH = "donations.db"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ✅ DEVPRODUCT_AMOUNTS
 DEVPRODUCT_AMOUNTS = {
     "3593525234": 1,
     "3593525497": 50,
@@ -39,10 +38,8 @@ MIN_GROUP_TENURE_DAYS = 7
 # ============================================================================
 
 def init_db():
-    """Initialiser la base de données SQLite"""
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
-    
     c.execute('''
         CREATE TABLE IF NOT EXISTS donations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,13 +55,11 @@ def init_db():
             last_retry TIMESTAMP
         )
     ''')
-    
     conn.commit()
     conn.close()
 
 
 def get_db():
-    """Obtenir une connexion à la base de données"""
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -75,10 +70,8 @@ def get_db():
 # ============================================================================
 
 def verify_webhook_signature(data, signature):
-    """Vérifier la signature du webhook Roblox"""
     if not WEBHOOK_SECRET:
-        return True  # Skip si pas de secret configuré
-    
+        return True
     expected_sig = hmac.new(
         WEBHOOK_SECRET.encode(),
         data,
@@ -88,7 +81,6 @@ def verify_webhook_signature(data, signature):
 
 
 def get_user_info(user_id):
-    """Récupérer les infos utilisateur Roblox"""
     try:
         resp = requests.get(
             f"https://users.roblox.com/v1/users/{user_id}",
@@ -102,7 +94,6 @@ def get_user_info(user_id):
 
 
 def get_group_membership(user_id, group_id):
-    """Vérifier si l'utilisateur est dans le groupe"""
     try:
         resp = requests.get(
             f"https://groups.roblox.com/v1/users/{user_id}/groups",
@@ -124,17 +115,13 @@ def get_group_membership(user_id, group_id):
 
 
 def check_eligibility(user_id, group_id, days_required=MIN_GROUP_TENURE_DAYS):
-    """Vérifier si un joueur est éligible"""
     membership = get_group_membership(user_id, group_id)
-    
     if not membership.get("in_group"):
         return {"eligible": False, "reason": "Not in group"}
-    
     if membership.get("join_date"):
         try:
             join_date = datetime.fromisoformat(membership["join_date"].replace("Z", "+00:00"))
             days_in_group = (datetime.now(join_date.tzinfo) - join_date).days
-            
             if days_in_group < days_required:
                 return {
                     "eligible": False,
@@ -142,22 +129,18 @@ def check_eligibility(user_id, group_id, days_required=MIN_GROUP_TENURE_DAYS):
                 }
         except Exception as e:
             logger.error(f"Erreur parsing date: {e}")
-    
     return {"eligible": True, "reason": "Meets all requirements"}
 
 
 def transfer_robux(target_user_id, amount_robux):
-    """Transférer les Robux au joueur"""
     try:
         session = requests.Session()
         session.cookies.set('.ROBLOSECURITY', ACCOUNT_COOKIE)
-        
         headers = {
             'X-CSRF-TOKEN': '',
             'Content-Type': 'application/json',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
         }
-        
         csrf_response = session.post(
             'https://www.roblox.com/home',
             headers=headers,
@@ -165,20 +148,17 @@ def transfer_robux(target_user_id, amount_robux):
         )
         if 'X-CSRF-TOKEN' in csrf_response.headers:
             headers['X-CSRF-TOKEN'] = csrf_response.headers['X-CSRF-TOKEN']
-        
         transfer_payload = {
             'recipientId': target_user_id,
             'robux': amount_robux,
             'expectedCost': amount_robux
         }
-        
         transfer_response = session.post(
             'https://www.roblox.com/api/v1/user/economic-transactions/send-robux',
             json=transfer_payload,
             headers=headers,
             timeout=10
         )
-        
         if transfer_response.status_code == 200:
             result = transfer_response.json()
             if result.get('success'):
@@ -190,7 +170,6 @@ def transfer_robux(target_user_id, amount_robux):
         else:
             logger.error(f"❌ Erreur HTTP {transfer_response.status_code}")
             return False
-            
     except Exception as e:
         logger.error(f"❌ Erreur transfert Robux: {e}")
         return False
@@ -202,73 +181,129 @@ def transfer_robux(target_user_id, amount_robux):
 
 @app.route('/webhook/devproduct', methods=['POST'])
 def handle_devproduct_purchase():
-    """Webhook Roblox pour les achats DevProduct"""
-    
     try:
         signature = request.headers.get('X-Roblox-Signature')
         if signature and not verify_webhook_signature(request.data, signature):
             logger.warning("Signature webhook invalide")
             return jsonify({"error": "Invalid signature"}), 401
-        
+
         data = request.get_json()
-        
         user_id = data.get("userId")
         target_user_id = data.get("targetUserId")
         devproduct_id = str(data.get("devProductId"))
         transaction_id = data.get("transactionId", "unknown")
-        
+
         if not all([user_id, target_user_id, devproduct_id]):
             return jsonify({"error": "Missing fields"}), 400
-        
+
         if devproduct_id not in DEVPRODUCT_AMOUNTS:
             logger.warning(f"DevProduct inconnu: {devproduct_id}")
             return jsonify({"error": "Unknown DevProduct"}), 400
-        
+
         amount = DEVPRODUCT_AMOUNTS[devproduct_id]
         final_amount = math.ceil(amount * (1 - TAX_RATE))
-        taxes = amount - final_amount
-        
+
         conn = get_db()
         c = conn.cursor()
-        
         c.execute('''
             INSERT INTO donations 
             (player_id, target_player_id, devproduct_id, amount_robux, final_amount, status)
             VALUES (?, ?, ?, ?, ?, 'pending')
         ''', (user_id, target_user_id, devproduct_id, amount, final_amount))
-        
         conn.commit()
         donation_id = c.lastrowid
         conn.close()
-        
+
         logger.info(f"✅ Donation {donation_id} enregistrée: {user_id} -> {target_user_id} ({amount} Robux)")
-        
+
         return jsonify({
             "success": True,
             "donationId": donation_id,
             "message": f"Donation enregistrée: {final_amount} Robux seront transférés dans {WAIT_DAYS} jours",
             "estimatedDate": (datetime.now() + timedelta(days=WAIT_DAYS)).isoformat()
         }), 200
-        
+
     except Exception as e:
         logger.error(f"Erreur webhook: {e}")
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/status/<int:donation_id>', methods=['GET'])
-def get_donation_status(donation_id):
-    """Obtenir le statut d'une donation"""
+# ============================================================================
+# ✅ NOUVEAU: Endpoint pour que le bot récupère les donations en attente
+# ============================================================================
+
+@app.route('/pending', methods=['GET'])
+def get_pending_donations():
+    """Donations en attente depuis plus de WAIT_DAYS jours — appelé par le bot Discord"""
     try:
         conn = get_db()
         c = conn.cursor()
-        
+        cutoff_date = datetime.now() - timedelta(days=WAIT_DAYS)
+        c.execute('''
+            SELECT * FROM donations 
+            WHERE status = 'pending' AND created_at <= ? AND retry_count < 5
+            ORDER BY created_at ASC LIMIT 5
+        ''', (cutoff_date,))
+        donations = [dict(row) for row in c.fetchall()]
+        conn.close()
+        logger.info(f"📋 /pending: {len(donations)} donation(s) retournée(s)")
+        return jsonify({"success": True, "donations": donations}), 200
+    except Exception as e:
+        logger.error(f"Erreur get_pending_donations: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================================
+# ✅ NOUVEAU: Endpoint pour que le bot mette à jour le statut d'une donation
+# ============================================================================
+
+@app.route('/donations/<int:donation_id>/status', methods=['PATCH'])
+def update_donation_status(donation_id):
+    """Met à jour le statut d'une donation — appelé par le bot Discord"""
+    try:
+        data = request.get_json()
+        new_status = data.get("status")
+
+        if new_status not in ("completed", "pending", "requeue", "failed"):
+            return jsonify({"error": "Invalid status"}), 400
+
+        conn = get_db()
+        c = conn.cursor()
+
+        if new_status == "completed":
+            c.execute('''
+                UPDATE donations 
+                SET status = 'completed', processed_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (donation_id,))
+        else:
+            c.execute('''
+                UPDATE donations 
+                SET status = ?, retry_count = retry_count + 1, last_retry = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (new_status, donation_id))
+
+        conn.commit()
+        conn.close()
+
+        logger.info(f"✅ Donation {donation_id} mise à jour: {new_status}")
+        return jsonify({"success": True}), 200
+
+    except Exception as e:
+        logger.error(f"Erreur update_donation_status: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/status/<int:donation_id>', methods=['GET'])
+def get_donation_status(donation_id):
+    try:
+        conn = get_db()
+        c = conn.cursor()
         c.execute('SELECT * FROM donations WHERE id = ?', (donation_id,))
         donation = c.fetchone()
         conn.close()
-        
         if not donation:
             return jsonify({"error": "Donation not found"}), 404
-        
         return jsonify({
             "id": donation['id'],
             "status": donation['status'],
@@ -285,20 +320,12 @@ def get_donation_status(donation_id):
 
 @app.route('/list', methods=['GET'])
 def list_donations():
-    """Lister toutes les donations"""
     try:
         conn = get_db()
         c = conn.cursor()
-        
-        c.execute('''
-            SELECT * FROM donations 
-            ORDER BY created_at DESC 
-            LIMIT 50
-        ''')
-        
+        c.execute('SELECT * FROM donations ORDER BY created_at DESC LIMIT 50')
         donations = c.fetchall()
         conn.close()
-        
         return jsonify({
             "success": True,
             "count": len(donations),
@@ -323,11 +350,7 @@ def list_donations():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check pour monitoring"""
-    return jsonify({
-        "status": "ok",
-        "timestamp": datetime.now().isoformat()
-    }), 200
+    return jsonify({"status": "ok", "timestamp": datetime.now().isoformat()}), 200
 
 
 @app.route('/', methods=['GET'])
@@ -337,6 +360,8 @@ def index():
         "status": "running",
         "endpoints": {
             "webhook": "/webhook/devproduct (POST)",
+            "pending": "/pending (GET)",
+            "update_status": "/donations/<id>/status (PATCH)",
             "status": "/status/<donation_id> (GET)",
             "list": "/list (GET)",
             "health": "/health (GET)"
@@ -349,7 +374,6 @@ def index():
 # ============================================================================
 
 init_db()
-
 logger.info("✅ API Donation en cours de démarrage...")
 logger.info(f"🔧 DevProducts configurés: {list(DEVPRODUCT_AMOUNTS.keys())}")
 
