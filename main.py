@@ -257,7 +257,7 @@ def get_pending_donations():
 # ✅ NOUVEAU: Endpoint pour que le bot mette à jour le statut d'une donation
 # ============================================================================
 
-@app.route('/donations/<int:donation_id>/status', methods=['PATCH'])
+@app.route('/donations/<int:donation_id>/status', methods=['POST'])
 def update_donation_status(donation_id):
     """Met à jour le statut d'une donation — appelé par le bot Discord"""
     try:
