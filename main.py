@@ -132,46 +132,49 @@ def transfer_robux(target_user_id, amount_robux):
     try:
         session = requests.Session()
         session.cookies.set('.ROBLOSECURITY', ACCOUNT_COOKIE)
+
+        # Récupérer le CSRF token
+        csrf_response = session.post('https://auth.roblox.com/v2/logout', timeout=5)
+        csrf_token = csrf_response.headers.get('x-csrf-token', '')
+
         headers = {
-            'X-CSRF-TOKEN': '',
+            'X-CSRF-TOKEN': csrf_token,
             'Content-Type': 'application/json',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
         }
-        csrf_response = session.post('https://www.roblox.com/home', headers=headers, timeout=5)
-        if 'X-CSRF-TOKEN' in csrf_response.headers:
-            headers['X-CSRF-TOKEN'] = csrf_response.headers['X-CSRF-TOKEN']
 
-        transfer_payload = {
-            'recipientId': target_user_id,
-            'robux': amount_robux,
-            'expectedCost': amount_robux
+        payload = {
+            "PayoutType": "FixedAmount",
+            "Recipients": [
+                {
+                    "recipientId": target_user_id,
+                    "recipientType": "User",
+                    "amount": amount_robux
+                }
+            ]
         }
-        transfer_response = session.post(
-            'https://www.roblox.com/api/v1/user/economic-transactions/send-robux',
-            json=transfer_payload,
+
+        response = session.post(
+            f'https://groups.roblox.com/v1/groups/{GROUP_ID}/payouts',
+            json=payload,
             headers=headers,
             timeout=10
         )
 
         roblox_proof = {
-            "endpoint": "send-robux",
+            "endpoint": f"groups/{GROUP_ID}/payouts",
             "recipientId": target_user_id,
             "amountSent": amount_robux,
-            "httpStatus": transfer_response.status_code,
-            "response": transfer_response.json() if transfer_response.content else {},
+            "httpStatus": response.status_code,
+            "response": response.json() if response.content else {},
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
 
-        if transfer_response.status_code == 200:
-            result = transfer_response.json()
-            if result.get('success'):
-                logger.info(f"✅ Transfert réussi: {amount_robux} Robux à {target_user_id}")
-                return True, roblox_proof
-            else:
-                logger.error(f"❌ Erreur transfert: {result.get('message')}")
-                return False, roblox_proof
+        if response.status_code == 200:
+            logger.info(f"✅ Payout réussi: {amount_robux} Robux à {target_user_id}")
+            return True, roblox_proof
         else:
-            logger.error(f"❌ Erreur HTTP {transfer_response.status_code}")
+            logger.error(f"❌ Erreur payout: {response.status_code} — {response.text}")
             return False, roblox_proof
 
     except Exception as e:
