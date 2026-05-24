@@ -8,6 +8,7 @@ import requests
 import math
 import json
 import base64
+import time
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
@@ -109,8 +110,8 @@ class RobloxPayout:
             r = requests.post("https://auth.roblox.com/v2/logout", headers=self.headers, timeout=5)
             token = r.headers.get('X-CSRF-TOKEN') or r.headers.get('x-csrf-token')
             if not token:
-                r2 = requests.get(f"https://groups.roblox.com/v1/groups/{self.group_id}", 
-                                 headers=self.headers, timeout=5)
+                r2 = requests.get(f"https://groups.roblox.com/v1/groups/{self.group_id}",
+                                  headers=self.headers, timeout=5)
                 token = r2.headers.get('X-CSRF-TOKEN') or r2.headers.get('x-csrf-token')
             if token:
                 self.headers['X-CSRF-TOKEN'] = token
@@ -151,16 +152,16 @@ class RobloxPayout:
                 timeout=10
             )
             logger.info(f"[2FA] Response status: {r.status_code}")
-            
+
             if r.status_code != 200:
                 logger.error(f"[2FA] HTTP {r.status_code}: {r.text[:200]}")
                 return None
-            
+
             data = r.json()
             if "errors" in data:
                 logger.error(f"[2FA] Erreur verify: {data['errors'][0].get('message', 'unknown')}")
                 return None
-            
+
             vtoken = data.get("verificationToken")
             logger.info(f"[2FA] ✅ Verification token reçu: {vtoken[:20] if vtoken else 'None'}...")
             return vtoken
@@ -175,7 +176,11 @@ class RobloxPayout:
             resp = requests.post(
                 "https://apis.roblox.com/challenge/v1/continue",
                 headers=self.headers,
-                json={"challengeId": challenge_id, "challengeType": challenge_type, "challengeMetadata": json.dumps(metadata)},
+                json={
+                    "challengeId": challenge_id,
+                    "challengeType": challenge_type,
+                    "challengeMetadata": json.dumps(metadata)
+                },
                 timeout=10
             )
             logger.info(f"[Challenge] Continue {challenge_type}: HTTP {resp.status_code}")
@@ -195,11 +200,11 @@ class RobloxPayout:
         r = self._payout_request(user_id, amount)
 
         if r.status_code == 200:
-            logger.info(f"✅ [Cookie] Payout réussi sans challenge")
+            logger.info("✅ [Cookie] Payout réussi sans challenge")
             return True, "ok"
 
-        challenge_type = r.headers.get("rblx-challenge-type", "").lower()
-        challenge_id = r.headers.get("rblx-challenge-id", "")
+        challenge_type     = r.headers.get("rblx-challenge-type", "").lower()
+        challenge_id       = r.headers.get("rblx-challenge-id", "")
         challenge_meta_b64 = r.headers.get("rblx-challenge-metadata", "")
 
         if not challenge_type or not challenge_id:
@@ -218,27 +223,27 @@ class RobloxPayout:
             cont = self._continue_challenge(challenge_id, "chef", chef_meta)
             if not cont:
                 return False, "Chef continue failed"
-            
-            cont_data = cont.json()
-            next_type = cont_data.get("challengeType", "")
+
+            cont_data    = cont.json()
+            next_type    = cont_data.get("challengeType", "")
             next_meta_raw = cont_data.get("challengeMetadata", "")
 
             if next_type == "":
-                # Chef passé, retry sans 2FA
+                # Chef passé sans 2FA
                 logger.info("[Chef] Passé sans 2FA, retry payout...")
+                time.sleep(1.5)  # anti-AutomatedTampering
                 final = self._payout_request(user_id, amount, {
-                    "rblx-challenge-id": challenge_id,
-                    "rblx-challenge-type": "twostepverification",
+                    "rblx-challenge-id":       challenge_id,
+                    "rblx-challenge-type":     "chef",
                     "rblx-challenge-metadata": challenge_meta_b64
                 })
 
             elif next_type == "twostepverification":
-                # ✅ CORRECTION ULTIME: Utiliser challengeMetadata de continue_challenge !
                 logger.info("[Chef] Unlock 2FA required")
                 try:
                     tfa_meta = json.loads(next_meta_raw)
                     tfa_user = tfa_meta["userId"]
-                    tfa_cid = tfa_meta["challengeId"]
+                    tfa_cid  = tfa_meta["challengeId"]
                 except Exception as e:
                     logger.error(f"[2FA] Erreur parse metadata: {e}")
                     return False, "2FA metadata parse failed"
@@ -247,10 +252,26 @@ class RobloxPayout:
                 if not vtoken:
                     return False, "2FA TOTP verification failed"
 
-                # ✅ Juste après verify_totp, la session est valide
-                # Retry sans aucun header de challenge
-                logger.info("[Chef+2FA] 2FA validé, retry payout clean (sans headers challenge)...")
-                final = self._payout_request(user_id, amount)
+                # ✅ FIX : Boucler le challenge avec le verificationToken
+                time.sleep(1.5)  # anti-AutomatedTampering
+                complete_meta = {
+                    "verificationToken": vtoken,
+                    "rememberDevice": False,
+                    "userId": tfa_user,
+                    "challengeId": tfa_cid,
+                }
+                cont2 = self._continue_challenge(challenge_id, "twostepverification", complete_meta)
+                if not cont2 or cont2.status_code >= 400:
+                    logger.error(f"[Chef+2FA] Continue après 2FA échoué: {cont2.text if cont2 else 'None'}")
+                    return False, "2FA continue failed"
+
+                logger.info("[Chef+2FA] Challenge complété, retry payout avec headers challenge...")
+                time.sleep(1.5)  # anti-AutomatedTampering
+                final = self._payout_request(user_id, amount, {
+                    "rblx-challenge-id":       challenge_id,
+                    "rblx-challenge-type":     "chef",
+                    "rblx-challenge-metadata": challenge_meta_b64,
+                })
 
             elif next_type == "blocksession":
                 logger.error("[Chef] Session bloquée (AutomatedTampering)")
@@ -270,9 +291,9 @@ class RobloxPayout:
         elif challenge_type == "twostepverification":
             logger.info("[2FA] 2FA directe (pas chef)")
             try:
-                meta = json.loads(base64.b64decode(challenge_meta_b64))
+                meta   = json.loads(base64.b64decode(challenge_meta_b64))
                 sender = meta["userId"]
-                cid = meta["challengeId"]
+                cid    = meta["challengeId"]
             except Exception as e:
                 logger.error(f"[2FA] Erreur parse metadata: {e}")
                 return False, "2FA metadata parse failed"
@@ -281,11 +302,27 @@ class RobloxPayout:
             if not vtoken:
                 return False, "2FA TOTP verification failed"
 
-            # ✅ Après verify_totp, la session est à jour
-            # Retry simple sans aucun header de challenge
-            logger.info("[2FA] 2FA validé, retry payout clean (sans headers challenge)...")
-            final = self._payout_request(user_id, amount)
-            
+            # ✅ FIX : Boucler le challenge avec le verificationToken
+            time.sleep(1.5)  # anti-AutomatedTampering
+            complete_meta = {
+                "verificationToken": vtoken,
+                "rememberDevice": False,
+                "userId": sender,
+                "challengeId": cid,
+            }
+            cont2 = self._continue_challenge(challenge_id, "twostepverification", complete_meta)
+            if not cont2 or cont2.status_code >= 400:
+                logger.error(f"[2FA] Continue après 2FA échoué: {cont2.text if cont2 else 'None'}")
+                return False, "2FA continue failed"
+
+            logger.info("[2FA] Challenge complété, retry payout avec headers challenge...")
+            time.sleep(1.5)  # anti-AutomatedTampering
+            final = self._payout_request(user_id, amount, {
+                "rblx-challenge-id":       challenge_id,
+                "rblx-challenge-type":     "twostepverification",
+                "rblx-challenge-metadata": challenge_meta_b64,
+            })
+
             if final.status_code == 200:
                 logger.info("✅ [2FA] Payout réussi après 2FA!")
                 return True, "ok"
@@ -299,7 +336,7 @@ class RobloxPayout:
         else:
             logger.error(f"[Cookie] Challenge inconnu: {challenge_type}")
             return False, f"Unknown challenge: {challenge_type}"
-        
+
 
 # ============================================================================
 # ROBLOX API
@@ -356,9 +393,6 @@ def check_eligibility(user_id, group_id, days_required=MIN_GROUP_TENURE_DAYS):
 
 
 def transfer_robux_opencloud(target_user_id, amount_robux):
-    """
-    Transfert via Roblox Open Cloud API (clé API) — pas de challenge.
-    """
     headers = {
         "x-api-key": ROBLOX_API_KEY,
         "Content-Type": "application/json",
@@ -393,9 +427,6 @@ def transfer_robux_opencloud(target_user_id, amount_robux):
 
 
 def transfer_robux_cookie_2fa(target_user_id, amount_robux):
-    """
-    Transfert via cookie + 2FA TOTP automatique.
-    """
     payout = RobloxPayout(ACCOUNT_COOKIE, GROUP_ID, ROBLOX_2FA_SECRET)
     success, detail = payout.payout(target_user_id, amount_robux)
     proof = {
@@ -411,10 +442,6 @@ def transfer_robux_cookie_2fa(target_user_id, amount_robux):
 
 
 def transfer_robux(target_user_id, amount_robux):
-    """
-    1. Essaie Open Cloud API
-    2. Fallback Cookie + 2FA automatique
-    """
     if ROBLOX_API_KEY:
         success, proof = transfer_robux_opencloud(target_user_id, amount_robux)
         if success:
@@ -472,13 +499,13 @@ def edit_discord_success(message_id, donor_name, donor_id, target_name, target_i
         "title": "✅ Donation transférée avec succès!",
         "color": 0x00FF7F,
         "fields": [
-            {"name": "👤 Donateur",   "value": f"`{donor_name}` (ID: `{donor_id}`)",   "inline": False},
-            {"name": "🎯 Receveur",   "value": f"`{target_name}` (ID: `{target_id}`)", "inline": False},
+            {"name": "👤 Donateur",    "value": f"`{donor_name}` (ID: `{donor_id}`)",   "inline": False},
+            {"name": "🎯 Receveur",    "value": f"`{target_name}` (ID: `{target_id}`)", "inline": False},
             {"name": "💵 Montant brut","value": f"`{amount} Robux`",                    "inline": True},
             {"name": f"🏦 Taxe (-{int(TAX_RATE*100)}%)", "value": f"`{taxes} Robux`",  "inline": True},
             {"name": "✨ Montant reçu","value": f"`{final_amount} Robux`",              "inline": True},
             {"name": "🔖 ID Donation","value": f"`#{donation_id}`",                    "inline": True},
-            {"name": "✅ Statut",     "value": "`Transféré`",                          "inline": True},
+            {"name": "✅ Statut",      "value": "`Transféré`",                          "inline": True},
             {"name": "📄 Preuve Roblox", "value": f"```json\n{proof_str}\n```",        "inline": False},
         ],
         "footer": {"text": "PolyVoice Donation System"},
@@ -527,7 +554,7 @@ def handle_devproduct_purchase():
             return jsonify({"error": "Invalid signature"}), 401
 
         data = request.get_json()
-        user_id       = data.get("userId")
+        user_id        = data.get("userId")
         target_user_id = data.get("targetUserId")
         devproduct_id  = str(data.get("devProductId"))
 
@@ -543,8 +570,8 @@ def handle_devproduct_purchase():
 
         donor_info  = get_user_info(user_id)
         target_info = get_user_info(target_user_id)
-        donor_name  = donor_info.get("name", str(user_id))  if donor_info  else str(user_id)
-        target_name = target_info.get("name", str(target_user_id)) if target_info else str(target_user_id)
+        donor_name  = donor_info.get("name", str(user_id))          if donor_info  else str(user_id)
+        target_name = target_info.get("name", str(target_user_id))  if target_info else str(target_user_id)
 
         conn = get_db()
         c = conn.cursor()
@@ -600,8 +627,8 @@ def get_pending_donations():
 @app.route('/donations/<int:donation_id>/status', methods=['POST'])
 def update_donation_status(donation_id):
     try:
-        data       = request.get_json()
-        new_status = data.get("status")
+        data         = request.get_json()
+        new_status   = data.get("status")
         roblox_proof = data.get("roblox_proof", None)
         fail_reason  = data.get("reason", "Erreur inconnue")
 
@@ -618,9 +645,7 @@ def update_donation_status(donation_id):
         donation = dict(row)
 
         if new_status == "completed":
-            c.execute('''
-                UPDATE donations SET status = 'completed', processed_at = NOW() WHERE id = %s
-            ''', (donation_id,))
+            c.execute('UPDATE donations SET status = \'completed\', processed_at = NOW() WHERE id = %s', (donation_id,))
         else:
             c.execute('''
                 UPDATE donations SET status = %s, retry_count = retry_count + 1, last_retry = NOW()
@@ -742,7 +767,6 @@ def dashboard():
     background-size:40px 40px; opacity:0.4; pointer-events:none; z-index:0;
   }
   .wrap { position:relative; z-index:1; max-width:1300px; margin:0 auto; padding:28px 24px; }
-
   .topbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:32px; padding-bottom:20px; border-bottom:1px solid var(--border); }
   .logo { display:flex; align-items:center; gap:12px; }
   .logo-dot { width:10px; height:10px; background:var(--accent); border-radius:50%; box-shadow:0 0 10px var(--accent); animation:pulse 2s infinite; }
@@ -753,10 +777,8 @@ def dashboard():
   .live-badge { display:flex; align-items:center; gap:6px; background:var(--green-bg); border:1px solid rgba(34,211,160,0.2); padding:5px 12px; border-radius:20px; font-size:11px; color:var(--green); font-family:'IBM Plex Mono',monospace; }
   .live-dot { width:6px; height:6px; background:var(--green); border-radius:50%; animation:pulse 1.5s infinite; }
   .clock { font-family:'IBM Plex Mono',monospace; font-size:13px; color:var(--muted); }
-
   .db-badge { display:flex; align-items:center; gap:10px; background:rgba(124,106,247,0.06); border:1px solid rgba(124,106,247,0.2); border-radius:8px; padding:10px 16px; margin-bottom:24px; font-size:12px; font-family:'IBM Plex Mono',monospace; color:var(--muted); }
   .db-badge strong { color:var(--accent); }
-
   .stats-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:28px; }
   .stat-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:20px; position:relative; overflow:hidden; }
   .stat-card::before { content:''; position:absolute; top:0; left:0; right:0; height:2px; }
@@ -770,20 +792,18 @@ def dashboard():
   .s-pending .stat-value  { color:var(--yellow); }
   .s-completed .stat-value{ color:var(--green); }
   .s-failed .stat-value   { color:var(--red); }
-
   .toolbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }
   .toolbar-left { display:flex; align-items:center; gap:12px; }
   .section-title { font-family:'IBM Plex Mono',monospace; font-size:13px; font-weight:500; letter-spacing:0.05em; }
   .count-badge { background:var(--accent-glow); border:1px solid rgba(124,106,247,0.3); color:var(--accent); font-size:11px; font-family:'IBM Plex Mono',monospace; padding:2px 8px; border-radius:4px; }
   .btn-group { display:flex; gap:8px; }
-  .btn { display:inline-flex; align-items:center; gap:6px; padding:7px 14px; border-radius:6px; font-size:12px; font-weight:500; font-family:'IBM Plex Sans',sans-serif; cursor:pointer; border:1px solid transparent; transition:all 0.15s; }
+  .btn { display:inline-flex; align-items:center; gap:6px; padding:7px 14px; border-radius:6px; font-size:12px; font-weight:500; cursor:pointer; border:1px solid transparent; transition:all 0.15s; }
   .btn-ghost { background:transparent; border-color:var(--border-hi); color:var(--muted); }
   .btn-ghost:hover { border-color:var(--text); color:var(--text); }
   .btn-green { background:var(--green-bg); border-color:rgba(34,211,160,0.3); color:var(--green); }
   .btn-green:hover { background:rgba(34,211,160,0.15); }
   .btn-red { background:var(--red-bg); border-color:rgba(240,90,90,0.3); color:var(--red); }
   .btn-red:hover { background:rgba(240,90,90,0.15); }
-
   .table-wrap { background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
   table { width:100%; border-collapse:collapse; }
   thead tr { border-bottom:1px solid var(--border); background:rgba(255,255,255,0.02); }
@@ -798,7 +818,6 @@ def dashboard():
   .amount-gross { color:var(--muted); }
   .amount-net { color:var(--green); font-weight:500; }
   .date-cell { font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--muted); }
-
   .badge { display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:4px; font-size:11px; font-weight:500; font-family:'IBM Plex Mono',monospace; }
   .badge::before { content:''; width:5px; height:5px; border-radius:50%; }
   .badge-pending   { background:var(--yellow-bg); color:var(--yellow); border:1px solid rgba(245,200,66,0.2); }
@@ -809,23 +828,19 @@ def dashboard():
   .badge-failed::before { background:var(--red); }
   .badge-requeue   { background:rgba(96,165,250,0.08); color:var(--blue); border:1px solid rgba(96,165,250,0.2); }
   .badge-requeue::before { background:var(--blue); }
-
   .row-actions { display:flex; gap:6px; }
   .row-btn { padding:4px 10px; border-radius:4px; font-size:11px; font-family:'IBM Plex Mono',monospace; cursor:pointer; border:1px solid transparent; transition:all 0.12s; font-weight:500; }
   .row-btn-ok  { background:var(--green-bg); border-color:rgba(34,211,160,0.25); color:var(--green); }
   .row-btn-ok:hover  { background:rgba(34,211,160,0.18); }
   .row-btn-del { background:var(--red-bg); border-color:rgba(240,90,90,0.25); color:var(--red); }
   .row-btn-del:hover { background:rgba(240,90,90,0.18); }
-
   .empty-state { text-align:center; padding:60px 20px; color:var(--muted); font-family:'IBM Plex Mono',monospace; font-size:13px; }
   .spinner { display:inline-block; width:18px; height:18px; border:2px solid var(--border-hi); border-top-color:var(--accent); border-radius:50%; animation:spin 0.7s linear infinite; vertical-align:middle; margin-right:8px; }
   @keyframes spin { to { transform:rotate(360deg); } }
-
   .toast { position:fixed; bottom:24px; right:24px; padding:12px 20px; border-radius:8px; font-size:13px; font-family:'IBM Plex Mono',monospace; font-weight:500; pointer-events:none; z-index:9999; opacity:0; transform:translateY(8px); transition:all 0.2s; }
   .toast.show { opacity:1; transform:translateY(0); }
   .toast-success { background:var(--green-bg); border:1px solid rgba(34,211,160,0.3); color:var(--green); }
   .toast-error   { background:var(--red-bg); border:1px solid rgba(240,90,90,0.3); color:var(--red); }
-
   @media(max-width:900px){ .stats-grid{grid-template-columns:repeat(2,1fr);} }
   @media(max-width:600px){ .stats-grid{grid-template-columns:1fr 1fr;} .topbar{flex-direction:column;gap:12px;} }
 </style>
@@ -845,19 +860,16 @@ def dashboard():
       <div class="clock" id="clock">--:--:--</div>
     </div>
   </div>
-
   <div class="db-badge">
     <span>🗄</span>
     <span>Base de données : <strong>Supabase / PostgreSQL</strong> &nbsp;|&nbsp; <span id="dbUrl">chargement...</span></span>
   </div>
-
   <div class="stats-grid">
     <div class="stat-card s-total">    <div class="stat-label">Total</div>    <div class="stat-value" id="s-total">—</div></div>
     <div class="stat-card s-pending">  <div class="stat-label">En attente</div><div class="stat-value" id="s-pending">—</div></div>
     <div class="stat-card s-completed"><div class="stat-label">Complétées</div><div class="stat-value" id="s-completed">—</div></div>
     <div class="stat-card s-failed">   <div class="stat-label">Échouées</div>  <div class="stat-value" id="s-failed">—</div></div>
   </div>
-
   <div class="toolbar">
     <div class="toolbar-left">
       <span class="section-title">DONATIONS</span>
@@ -869,7 +881,6 @@ def dashboard():
       <button class="btn btn-red"    id="deletePendingBtn">✕ Suppr. pending</button>
     </div>
   </div>
-
   <div class="table-wrap">
     <table>
       <thead>
@@ -884,9 +895,7 @@ def dashboard():
     </table>
   </div>
 </div>
-
 <div class="toast" id="toast"></div>
-
 <script>
 (function() {
   var BASE = window.location.origin;
@@ -898,16 +907,14 @@ def dashboard():
     }
     return '';
   })();
-
   function tickClock() {
     var n = new Date();
-    var h = n.getHours().toString().padStart(2,'0');
-    var m = n.getMinutes().toString().padStart(2,'0');
-    var s = n.getSeconds().toString().padStart(2,'0');
-    document.getElementById('clock').textContent = h+':'+m+':'+s;
+    document.getElementById('clock').textContent =
+      n.getHours().toString().padStart(2,'0')+':'+
+      n.getMinutes().toString().padStart(2,'0')+':'+
+      n.getSeconds().toString().padStart(2,'0');
   }
   setInterval(tickClock, 1000); tickClock();
-
   var toastTimer = null;
   function showToast(msg, isErr) {
     var el = document.getElementById('toast');
@@ -916,7 +923,6 @@ def dashboard():
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function() { el.className = 'toast'; }, 3000);
   }
-
   function badgeClass(st) {
     if (st === 'pending')   return 'badge-pending';
     if (st === 'completed') return 'badge-completed';
@@ -924,7 +930,6 @@ def dashboard():
     if (st === 'requeue')   return 'badge-requeue';
     return 'badge-pending';
   }
-
   function fmtDate(str) {
     if (!str) return '—';
     var d = new Date(str);
@@ -935,7 +940,6 @@ def dashboard():
       + d.getHours().toString().padStart(2,'0') + ':'
       + d.getMinutes().toString().padStart(2,'0');
   }
-
   function loadStats() {
     fetch(BASE + '/admin/stats?password=' + PWD)
       .then(function(r) { return r.json(); })
@@ -945,10 +949,8 @@ def dashboard():
         document.getElementById('s-completed').textContent = d.completed !== undefined ? d.completed : '?';
         document.getElementById('s-failed').textContent    = d.failed    !== undefined ? d.failed    : '?';
         if (d.db_info) document.getElementById('dbUrl').textContent = d.db_info;
-      })
-      .catch(function(e) { console.error('Stats:', e); });
+      }).catch(function(e) { console.error('Stats:', e); });
   }
-
   function loadTable() {
     fetch(BASE + '/admin/donations?password=' + PWD)
       .then(function(r) { return r.json(); })
@@ -962,57 +964,43 @@ def dashboard():
         }
         var rows = '';
         for (var i = 0; i < list.length; i++) {
-          var item    = list[i];
-          var donor   = item.donor_name  || String(item.player_id);
-          var receiver= item.target_name || String(item.target_player_id);
-          var st      = item.status || 'pending';
-          var id      = item.id;
+          var item = list[i];
+          var st   = item.status || 'pending';
           rows += '<tr>';
-          rows += '<td class="id-cell">#' + id + '</td>';
-          rows += '<td class="name-cell">' + donor + '</td>';
-          rows += '<td class="name-cell">' + receiver + '</td>';
+          rows += '<td class="id-cell">#' + item.id + '</td>';
+          rows += '<td class="name-cell">' + (item.donor_name  || item.player_id) + '</td>';
+          rows += '<td class="name-cell">' + (item.target_name || item.target_player_id) + '</td>';
           rows += '<td class="amount-cell amount-gross">' + item.amount_robux + ' R$</td>';
           rows += '<td class="amount-cell amount-net">'   + item.final_amount + ' R$</td>';
           rows += '<td><span class="badge ' + badgeClass(st) + '">' + st + '</span></td>';
           rows += '<td class="date-cell">' + fmtDate(item.created_at) + '</td>';
           rows += '<td><div class="row-actions">';
-          rows += '<button class="row-btn row-btn-ok"  data-id="' + id + '" onclick="markOK(this)">✓ OK</button>';
-          rows += '<button class="row-btn row-btn-del" data-id="' + id + '" onclick="delRow(this)">✕ DEL</button>';
+          rows += '<button class="row-btn row-btn-ok"  data-id="' + item.id + '" onclick="markOK(this)">✓ OK</button>';
+          rows += '<button class="row-btn row-btn-del" data-id="' + item.id + '" onclick="delRow(this)">✕ DEL</button>';
           rows += '</div></td></tr>';
         }
         tbody.innerHTML = rows;
-      })
-      .catch(function(e) {
-        console.error('Table:', e);
+      }).catch(function(e) {
         document.getElementById('tableBody').innerHTML =
           '<tr><td colspan="8" class="empty-state">Erreur de chargement</td></tr>';
       });
   }
-
   window.markOK = function(btn) {
     var id = btn.getAttribute('data-id');
     if (!confirm('Effectuer le vrai transfert Roblox pour la donation #' + id + ' ?')) return;
-    btn.disabled = true;
-    btn.textContent = '...';
+    btn.disabled = true; btn.textContent = '...';
     fetch(BASE + '/admin/donations/' + id + '/status?password=' + PWD, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: '{"status":"completed","force_transfer":true}'
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      if (d.transferred) {
-        showToast('Transfert #' + id + ' effectue !');
-      } else if (d.success) {
-        showToast('Statut mis a jour (pas de transfert)');
-      } else {
-        showToast('Echec transfert #' + id + ' — voir logs', true);
-      }
-      loadTable(); loadStats();
-    })
-    .catch(function() { showToast('Erreur reseau', true); btn.disabled = false; btn.textContent = 'OK'; });
+    }).then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.transferred) showToast('Transfert #' + id + ' effectué !');
+        else if (d.success) showToast('Statut mis à jour (pas de transfert)');
+        else showToast('Echec transfert #' + id + ' — voir logs', true);
+        loadTable(); loadStats();
+      }).catch(function() { showToast('Erreur réseau', true); btn.disabled = false; btn.textContent = '✓ OK'; });
   };
-
   window.delRow = function(btn) {
     var id = btn.getAttribute('data-id');
     if (!confirm('Supprimer la donation #' + id + ' ?')) return;
@@ -1020,10 +1008,7 @@ def dashboard():
       .then(function() { showToast('Supprimée #' + id); loadTable(); loadStats(); })
       .catch(function() { showToast('Erreur', true); });
   };
-
-  document.getElementById('refreshBtn').onclick = function() {
-    loadStats(); loadTable(); showToast('Données rechargées');
-  };
+  document.getElementById('refreshBtn').onclick = function() { loadStats(); loadTable(); showToast('Données rechargées'); };
   document.getElementById('completeAllBtn').onclick = function() {
     if (!confirm('Marquer TOUTES les pending comme completed ?')) return;
     fetch(BASE + '/admin/mark-completed?password=' + PWD, {method:'POST'})
@@ -1038,7 +1023,6 @@ def dashboard():
       .then(function(d) { showToast(d.deleted + ' supprimée(s)'); loadTable(); loadStats(); })
       .catch(function() { showToast('Erreur', true); });
   };
-
   loadStats(); loadTable();
   setInterval(function() { loadStats(); loadTable(); }, 20000);
 })();
@@ -1123,8 +1107,8 @@ def admin_update_status(donation_id):
     if password != ADMIN_PASSWORD:
         return jsonify({"error": "Unauthorized"}), 401
     try:
-        data = request.get_json()
-        new_status = data.get("status")
+        data           = request.get_json()
+        new_status     = data.get("status")
         force_transfer = data.get("force_transfer", False)
 
         if new_status not in ("pending", "completed", "failed"):
@@ -1141,17 +1125,13 @@ def admin_update_status(donation_id):
 
         if new_status == "completed" and force_transfer:
             target_user_id = donation['target_player_id']
-            amount = donation['final_amount']
+            amount         = donation['final_amount']
 
             success, roblox_proof = transfer_robux(target_user_id, amount)
 
             if success:
-                c.execute('''
-                    UPDATE donations SET status = 'completed', processed_at = NOW() WHERE id = %s
-                ''', (donation_id,))
-                conn.commit()
-                c.close(); conn.close()
-
+                c.execute('UPDATE donations SET status = \'completed\', processed_at = NOW() WHERE id = %s', (donation_id,))
+                conn.commit(); c.close(); conn.close()
                 donor_info  = get_user_info(donation['player_id'])
                 target_info = get_user_info(donation['target_player_id'])
                 donor_name  = donor_info.get("name",  str(donation['player_id']))        if donor_info  else str(donation['player_id'])
@@ -1170,9 +1150,7 @@ def admin_update_status(donation_id):
                 c.execute('''
                     UPDATE donations SET status = 'failed', retry_count = retry_count + 1, last_retry = NOW() WHERE id = %s
                 ''', (donation_id,))
-                conn.commit()
-                c.close(); conn.close()
-
+                conn.commit(); c.close(); conn.close()
                 donor_info  = get_user_info(donation['player_id'])
                 target_info = get_user_info(donation['target_player_id'])
                 donor_name  = donor_info.get("name",  str(donation['player_id']))        if donor_info  else str(donation['player_id'])
@@ -1188,8 +1166,7 @@ def admin_update_status(donation_id):
                 return jsonify({"success": False, "transferred": False, "proof": roblox_proof}), 200
 
         c.execute('UPDATE donations SET status = %s WHERE id = %s', (new_status, donation_id))
-        conn.commit()
-        c.close(); conn.close()
+        conn.commit(); c.close(); conn.close()
         return jsonify({"success": True, "transferred": False}), 200
 
     except Exception as e:
@@ -1206,8 +1183,7 @@ def admin_delete_donation(donation_id):
         conn = get_db()
         c = conn.cursor()
         c.execute('DELETE FROM donations WHERE id = %s', (donation_id,))
-        conn.commit()
-        c.close(); conn.close()
+        conn.commit(); c.close(); conn.close()
         return jsonify({"success": True}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1224,8 +1200,7 @@ def admin_cleanup_pending():
         c.execute("SELECT COUNT(*) AS n FROM donations WHERE status = 'pending'")
         cnt = c.fetchone()["n"]
         c.execute("DELETE FROM donations WHERE status = 'pending'")
-        conn.commit()
-        c.close(); conn.close()
+        conn.commit(); c.close(); conn.close()
         return jsonify({"success": True, "deleted": cnt}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
