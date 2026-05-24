@@ -322,7 +322,7 @@ class DonationCog(commands.Cog):
             await interaction.response.send_message("❌ Vous n'avez pas les permissions.", ephemeral=True)
             return
         
-        await interaction.response.defer()
+        await interaction.response.defer(thinking=True)
         
         conn = get_db()
         c = conn.cursor()
@@ -365,7 +365,7 @@ class DonationCog(commands.Cog):
             await interaction.response.send_message("❌ Vous n'avez pas les permissions.", ephemeral=True)
             return
         
-        await interaction.response.defer()
+        await interaction.response.defer(thinking=True)
         
         conn = get_db()
         c = conn.cursor()
@@ -417,7 +417,7 @@ class DonationCog(commands.Cog):
         if limit > 10:
             limit = 10
         
-        await interaction.response.defer()
+        await interaction.response.defer(thinking=True)
         
         conn = get_db()
         c = conn.cursor()
