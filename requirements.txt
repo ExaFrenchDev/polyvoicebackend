@@ -5,3 +5,4 @@ discord.py==2.4.0
 aiohttp==3.9.1
 gunicorn==21.2.0
 audioop-lts
+psycopg2-binary
