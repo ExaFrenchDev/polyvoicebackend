@@ -261,18 +261,21 @@ class RobloxPayout:
                 if not cont_resp or cont_resp.status_code != 200:
                     logger.warning("[Chef+2FA] Continue challenge failed (HTTP %d)", cont_resp.status_code if cont_resp else 0)
                 
-                # ✅ Récupérer le NEW challenge metadata de la réponse continue
+                # ✅ ULTRA IMPORTANT: Récupérer le NEW challenge_id ET metadata de la réponse
                 final_metadata = None
+                new_challenge_id = challenge_id  # Fallback: utiliser l'ancien si pas de nouveau
                 if cont_resp and cont_resp.status_code == 200:
                     try:
                         cont_data = cont_resp.json()
                         final_metadata = cont_data.get("challengeMetadata", "")
+                        new_challenge_id = cont_data.get("challengeId", challenge_id)
+                        logger.info(f"[Chef+2FA] New challenge_id: {new_challenge_id[:20] if len(str(new_challenge_id)) > 20 else new_challenge_id}...")
                         logger.info(f"[Chef+2FA] Metadata reçu: {final_metadata[:50] if final_metadata else 'None'}...")
                     except Exception as e:
-                        logger.warning(f"[Chef+2FA] Erreur récupération metadata: {e}")
+                        logger.warning(f"[Chef+2FA] Erreur récupération: {e}")
 
-                # ✅ Retry AVEC le nouveau challenge metadata (encodé en base64)
-                logger.info("[Chef+2FA] Retry payout avec nouveau metadata...")
+                # ✅ Retry AVEC le NEW challenge_id ET metadata (encodé en base64)
+                logger.info("[Chef+2FA] Retry payout avec nouveau challenge_id et metadata...")
                 if final_metadata:
                     # Encoder en base64 si c'est du JSON brut
                     meta_to_send = final_metadata
@@ -284,7 +287,7 @@ class RobloxPayout:
                             logger.warning(f"[Chef+2FA] Erreur encoding metadata: {e}")
                     
                     final = self._payout_request(user_id, amount, {
-                        "rblx-challenge-id": challenge_id,
+                        "rblx-challenge-id": new_challenge_id,
                         "rblx-challenge-type": "twostepverification",
                         "rblx-challenge-metadata": meta_to_send
                     })
@@ -332,18 +335,21 @@ class RobloxPayout:
             logger.info("[2FA] Continuer le challenge 2FA...")
             cont_resp = self._continue_challenge(challenge_id, "twostepverification", tfa_proof)
             
-            # ✅ Récupérer le metadata reçu
+            # ✅ Récupérer le NEW challenge_id ET metadata de la réponse
             final_metadata = None
+            new_challenge_id = challenge_id  # Fallback
             if cont_resp and cont_resp.status_code == 200:
                 try:
                     cont_data = cont_resp.json()
                     final_metadata = cont_data.get("challengeMetadata", "")
+                    new_challenge_id = cont_data.get("challengeId", challenge_id)
+                    logger.info(f"[2FA] New challenge_id: {new_challenge_id[:20] if len(str(new_challenge_id)) > 20 else new_challenge_id}...")
                     logger.info(f"[2FA] Metadata reçu: {final_metadata[:50] if final_metadata else 'None'}...")
                 except Exception as e:
-                    logger.warning(f"[2FA] Erreur récupération metadata: {e}")
+                    logger.warning(f"[2FA] Erreur récupération: {e}")
 
-            # ✅ Retry AVEC le nouveau challenge metadata (encodé en base64)
-            logger.info("[2FA] Retry payout avec nouveau metadata...")
+            # ✅ Retry AVEC le NEW challenge_id ET metadata (encodé en base64)
+            logger.info("[2FA] Retry payout avec nouveau challenge_id et metadata...")
             if final_metadata:
                 # Encoder en base64 si c'est du JSON brut
                 meta_to_send = final_metadata
@@ -355,7 +361,7 @@ class RobloxPayout:
                         logger.warning(f"[2FA] Erreur encoding metadata: {e}")
                 
                 final = self._payout_request(user_id, amount, {
-                    'rblx-challenge-id': challenge_id,
+                    'rblx-challenge-id': new_challenge_id,
                     'rblx-challenge-metadata': meta_to_send,
                     'rblx-challenge-type': "twostepverification"
                 })
