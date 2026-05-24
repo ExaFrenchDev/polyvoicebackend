@@ -247,7 +247,7 @@ def edit_discord_success(message_id, donor_name, donor_id, target_name, target_i
             {"name": "👤 Donateur",            "value": f"`{donor_name}` (ID: `{donor_id}`)",   "inline": False},
             {"name": "🎯 Receveur",             "value": f"`{target_name}` (ID: `{target_id}`)", "inline": False},
             {"name": "💵 Montant brut",         "value": f"`{amount} Robux`",                    "inline": True},
-            {"name": "🏦 Taxe Roblox (-40%)",   "value": f"`{taxes} Robux`",                     "inline": True},
+            {"name": f"🏦 Taxe Roblox (-{TAX_RATE * 100}%)",   "value": f"`{taxes} Robux`",                     "inline": True},
             {"name": "✨ Montant reçu",          "value": f"`{final_amount} Robux`",              "inline": True},
             {"name": "🔖 ID Donation",          "value": f"`#{donation_id}`",                    "inline": True},
             {"name": "✅ Statut",                "value": "`Transféré`",                          "inline": True},
