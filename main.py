@@ -98,14 +98,6 @@ def is_admin(user_id):
     return user_id in ADMIN_DISCORD_IDS
 
 
-async def admin_only(ctx):
-    """Vérifier les permissions admin"""
-    if not is_admin(ctx.author.id):
-        await ctx.send("❌ Vous n'avez pas les permissions pour cette commande.")
-        return False
-    return True
-
-
 # ============================================================================
 # ROBLOX API
 # ============================================================================
@@ -315,14 +307,17 @@ class DonationCog(commands.Cog):
         conn.close()
     
     # ========================================================================
-    # COMMANDES ADMIN
+    # SLASH COMMANDS ADMIN
     # ========================================================================
     
-    @commands.command(name="donations_stats")
-    async def donations_stats(self, ctx):
+    @discord.app_commands.command(name="donations_stats", description="Voir les statistiques des donations")
+    async def donations_stats(self, interaction: discord.Interaction):
         """Afficher les statistiques de donations (ADMIN)"""
-        if not await admin_only(ctx):
+        if not is_admin(interaction.user.id):
+            await interaction.response.send_message("❌ Vous n'avez pas les permissions.", ephemeral=True)
             return
+        
+        await interaction.response.defer()
         
         conn = get_db()
         c = conn.cursor()
@@ -355,13 +350,17 @@ class DonationCog(commands.Cog):
         embed.add_field(name="Robux total reçus", value=f"```{total_robux}```", inline=False)
         embed.add_field(name="Robux transférés (net)", value=f"```{final_robux}```", inline=False)
         
-        await ctx.send(embed=embed)
+        await interaction.followup.send(embed=embed)
     
-    @commands.command(name="donation_status")
-    async def donation_status(self, ctx, donation_id: int):
+    @discord.app_commands.command(name="donation_status", description="Voir le statut d'une donation")
+    @discord.app_commands.describe(donation_id="ID de la donation")
+    async def donation_status(self, interaction: discord.Interaction, donation_id: int):
         """Voir le statut d'une donation (ADMIN)"""
-        if not await admin_only(ctx):
+        if not is_admin(interaction.user.id):
+            await interaction.response.send_message("❌ Vous n'avez pas les permissions.", ephemeral=True)
             return
+        
+        await interaction.response.defer()
         
         conn = get_db()
         c = conn.cursor()
@@ -371,7 +370,7 @@ class DonationCog(commands.Cog):
         conn.close()
         
         if not donation:
-            await ctx.send("❌ Donation non trouvée")
+            await interaction.followup.send("❌ Donation non trouvée")
             return
         
         player_info = get_user_info(donation['player_id'])
@@ -400,13 +399,20 @@ class DonationCog(commands.Cog):
             embed.add_field(name="Traitée le", value=f"```{donation['processed_at']}```", inline=False)
         embed.add_field(name="Tentatives", value=f"```{donation['retry_count']}/5```", inline=True)
         
-        await ctx.send(embed=embed)
+        await interaction.followup.send(embed=embed)
     
-    @commands.command(name="pending_donations")
-    async def pending_donations(self, ctx, limit: int = 5):
+    @discord.app_commands.command(name="pending_donations", description="Lister les donations en attente")
+    @discord.app_commands.describe(limit="Nombre de donations à afficher (max 10)")
+    async def pending_donations(self, interaction: discord.Interaction, limit: int = 5):
         """Lister les donations en attente (ADMIN)"""
-        if not await admin_only(ctx):
+        if not is_admin(interaction.user.id):
+            await interaction.response.send_message("❌ Vous n'avez pas les permissions.", ephemeral=True)
             return
+        
+        if limit > 10:
+            limit = 10
+        
+        await interaction.response.defer()
         
         conn = get_db()
         c = conn.cursor()
@@ -422,7 +428,7 @@ class DonationCog(commands.Cog):
         conn.close()
         
         if not donations:
-            await ctx.send("✅ Aucune donation en attente")
+            await interaction.followup.send("✅ Aucune donation en attente")
             return
         
         embed = discord.Embed(
@@ -439,13 +445,17 @@ class DonationCog(commands.Cog):
                 inline=False
             )
         
-        await ctx.send(embed=embed)
+        await interaction.followup.send(embed=embed)
     
-    @commands.command(name="user_donations")
-    async def user_donations(self, ctx, roblox_user_id: int):
+    @discord.app_commands.command(name="user_donations", description="Voir toutes les donations d'un utilisateur")
+    @discord.app_commands.describe(roblox_user_id="ID Roblox de l'utilisateur")
+    async def user_donations(self, interaction: discord.Interaction, roblox_user_id: int):
         """Voir toutes les donations d'un utilisateur (ADMIN)"""
-        if not await admin_only(ctx):
+        if not is_admin(interaction.user.id):
+            await interaction.response.send_message("❌ Vous n'avez pas les permissions.", ephemeral=True)
             return
+        
+        await interaction.response.defer()
         
         conn = get_db()
         c = conn.cursor()
@@ -460,7 +470,7 @@ class DonationCog(commands.Cog):
         conn.close()
         
         if not donations:
-            await ctx.send(f"❌ Aucune donation pour l'utilisateur {roblox_user_id}")
+            await interaction.followup.send(f"❌ Aucune donation pour l'utilisateur {roblox_user_id}")
             return
         
         user_info = get_user_info(roblox_user_id)
@@ -482,17 +492,18 @@ class DonationCog(commands.Cog):
             )
         
         embed.set_footer(text=f"Total: {total_robux} Robux")
-        await ctx.send(embed=embed)
+        await interaction.followup.send(embed=embed)
     
-    @commands.command(name="force_check")
-    async def force_check(self, ctx):
+    @discord.app_commands.command(name="force_check", description="Forcer la vérification immédiate des donations")
+    async def force_check(self, interaction: discord.Interaction):
         """Forcer la vérification immédiate (ADMIN)"""
-        if not await admin_only(ctx):
+        if not is_admin(interaction.user.id):
+            await interaction.response.send_message("❌ Vous n'avez pas les permissions.", ephemeral=True)
             return
         
-        await ctx.send("⚙️ Vérification forcée en cours...")
+        await interaction.response.send_message("⚙️ Vérification forcée en cours...")
         await self.check_donations()
-        await ctx.send("✅ Vérification terminée")
+        await interaction.followup.send("✅ Vérification terminée")
 
 
 async def setup_bot():
