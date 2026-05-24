@@ -271,13 +271,22 @@ class RobloxPayout:
                     except Exception as e:
                         logger.warning(f"[Chef+2FA] Erreur récupération metadata: {e}")
 
-                # ✅ Retry AVEC le nouveau challenge metadata
+                # ✅ Retry AVEC le nouveau challenge metadata (encodé en base64)
                 logger.info("[Chef+2FA] Retry payout avec nouveau metadata...")
                 if final_metadata:
+                    # Encoder en base64 si c'est du JSON brut
+                    meta_to_send = final_metadata
+                    if isinstance(final_metadata, str) and final_metadata.startswith('{'):
+                        try:
+                            meta_to_send = base64.b64encode(final_metadata.encode()).decode()
+                            logger.info(f"[Chef+2FA] Metadata encodé en base64: {meta_to_send[:50]}...")
+                        except Exception as e:
+                            logger.warning(f"[Chef+2FA] Erreur encoding metadata: {e}")
+                    
                     final = self._payout_request(user_id, amount, {
                         "rblx-challenge-id": challenge_id,
                         "rblx-challenge-type": "twostepverification",
-                        "rblx-challenge-metadata": final_metadata
+                        "rblx-challenge-metadata": meta_to_send
                     })
                 else:
                     # Fallback: sans headers si pas de metadata
@@ -333,12 +342,21 @@ class RobloxPayout:
                 except Exception as e:
                     logger.warning(f"[2FA] Erreur récupération metadata: {e}")
 
-            # ✅ Retry AVEC le nouveau challenge metadata
+            # ✅ Retry AVEC le nouveau challenge metadata (encodé en base64)
             logger.info("[2FA] Retry payout avec nouveau metadata...")
             if final_metadata:
+                # Encoder en base64 si c'est du JSON brut
+                meta_to_send = final_metadata
+                if isinstance(final_metadata, str) and final_metadata.startswith('{'):
+                    try:
+                        meta_to_send = base64.b64encode(final_metadata.encode()).decode()
+                        logger.info(f"[2FA] Metadata encodé en base64: {meta_to_send[:50]}...")
+                    except Exception as e:
+                        logger.warning(f"[2FA] Erreur encoding metadata: {e}")
+                
                 final = self._payout_request(user_id, amount, {
                     'rblx-challenge-id': challenge_id,
-                    'rblx-challenge-metadata': final_metadata,
+                    'rblx-challenge-metadata': meta_to_send,
                     'rblx-challenge-type': "twostepverification"
                 })
             else:
