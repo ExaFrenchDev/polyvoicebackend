@@ -4,35 +4,25 @@ import os
 import sqlite3
 import hashlib
 import hmac
-import asyncio
-import threading
-from dotenv import load_dotenv
-import discord
-from discord.ext import commands, tasks
 import logging
 import requests
-from concurrent.futures import ThreadPoolExecutor
-import queue
 import math
+from dotenv import load_dotenv
 
 load_dotenv()
 
 app = Flask(__name__)
 
 # Configuration
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
-ROBLOX_GAME_ID = int(os.getenv("ROBLOX_GAME_ID"))
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-GROUP_ID = int(os.getenv("GROUP_ID"))
-ACCOUNT_COOKIE = os.getenv("ROBLOX_ACCOUNT_COOKIE")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+GROUP_ID = int(os.getenv("GROUP_ID", "0"))
+ACCOUNT_COOKIE = os.getenv("ROBLOX_ACCOUNT_COOKIE", "")
 DATABASE_PATH = "donations.db"
-ADMIN_DISCORD_IDS = list(map(int, os.getenv("ADMIN_DISCORD_IDS", "").split(","))) if os.getenv("ADMIN_DISCORD_IDS") else []
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ✅ DEVPRODUCT_AMOUNTS CORRECTS
+# ✅ DEVPRODUCT_AMOUNTS
 DEVPRODUCT_AMOUNTS = {
     "3593525234": 1,
     "3593525497": 50,
@@ -43,8 +33,6 @@ TAX_RATE = 0.40
 WAIT_DAYS = 7
 MIN_GROUP_TENURE_DAYS = 7
 
-# Queue pour les tâches asynchrones
-notification_queue = queue.Queue()
 
 # ============================================================================
 # DATABASE
@@ -71,14 +59,6 @@ def init_db():
         )
     ''')
     
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS group_members (
-            user_id INTEGER PRIMARY KEY,
-            join_date TIMESTAMP,
-            last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
     conn.commit()
     conn.close()
 
@@ -91,20 +71,14 @@ def get_db():
 
 
 # ============================================================================
-# PERMISSIONS
-# ============================================================================
-
-def is_admin(user_id):
-    """Vérifier si un utilisateur Discord est admin"""
-    return user_id in ADMIN_DISCORD_IDS
-
-
-# ============================================================================
-# ROBLOX API (avec timeout court)
+# ROBLOX API
 # ============================================================================
 
 def verify_webhook_signature(data, signature):
     """Vérifier la signature du webhook Roblox"""
+    if not WEBHOOK_SECRET:
+        return True  # Skip si pas de secret configuré
+    
     expected_sig = hmac.new(
         WEBHOOK_SECRET.encode(),
         data,
@@ -114,11 +88,11 @@ def verify_webhook_signature(data, signature):
 
 
 def get_user_info(user_id):
-    """Récupérer les infos utilisateur Roblox (avec timeout)"""
+    """Récupérer les infos utilisateur Roblox"""
     try:
         resp = requests.get(
             f"https://users.roblox.com/v1/users/{user_id}",
-            timeout=3  # ⚠️ TIMEOUT COURT
+            timeout=3
         )
         if resp.status_code == 200:
             return resp.json()
@@ -132,7 +106,7 @@ def get_group_membership(user_id, group_id):
     try:
         resp = requests.get(
             f"https://groups.roblox.com/v1/users/{user_id}/groups",
-            timeout=3  # ⚠️ TIMEOUT COURT
+            timeout=3
         )
         if resp.status_code == 200:
             data = resp.json()
@@ -223,160 +197,7 @@ def transfer_robux(target_user_id, amount_robux):
 
 
 # ============================================================================
-# DISCORD BOT (NON-BLOQUANT)
-# ============================================================================
-
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-
-class DonationCog(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-        self.channel_id = DISCORD_CHANNEL_ID
-        self.check_donations.start()
-    
-    @commands.Cog.listener()
-    async def on_ready(self):
-        logger.info(f"✅ Discord bot connecté: {self.bot.user}")
-        try:
-            synced = await self.bot.tree.sync()
-            logger.info(f"✅ {len(synced)} slash commands synchronisées")
-        except Exception as e:
-            logger.error(f"❌ Erreur sync commands: {e}")
-    
-    async def send_donation_notification(self, player_name, target_name, amount, final_amount, taxes):
-        """Envoyer une notification Discord"""
-        try:
-            channel = self.bot.get_channel(DISCORD_CHANNEL_ID)
-            if not channel:
-                logger.error("Canal Discord non trouvé")
-                return
-            
-            embed = discord.Embed(
-                title="💰 Nouvelle Donation!",
-                color=discord.Color.gold(),
-                timestamp=datetime.now()
-            )
-            embed.add_field(name="Donateur", value=f"```{player_name}```", inline=False)
-            embed.add_field(name="Pour", value=f"```{target_name}```", inline=True)
-            embed.add_field(name="Montant", value=f"```{amount} Robux```", inline=True)
-            embed.add_field(name="Après taxes (-40%)", value=f"```{final_amount} Robux```", inline=True)
-            embed.add_field(name="Taxes Roblox", value=f"```{taxes} Robux```", inline=False)
-            
-            await channel.send(embed=embed)
-            logger.info(f"✅ Notification Discord envoyée")
-        except Exception as e:
-            logger.error(f"Erreur send_donation_notification: {e}")
-    
-    @tasks.loop(minutes=30)
-    async def check_donations(self):
-        """Vérifier les donations en attente"""
-        logger.info("Vérification des donations en attente...")
-        
-        try:
-            conn = get_db()
-            c = conn.cursor()
-            
-            cutoff_date = datetime.now() - timedelta(days=WAIT_DAYS)
-            
-            c.execute('''
-                SELECT * FROM donations 
-                WHERE status = 'pending' AND created_at <= ? AND retry_count < 5
-                ORDER BY created_at ASC
-                LIMIT 5
-            ''', (cutoff_date,))
-            
-            donations = c.fetchall()
-            
-            for donation in donations:
-                user_id = donation['target_player_id']
-                amount = donation['final_amount']
-                
-                eligibility = check_eligibility(user_id, GROUP_ID)
-                
-                if eligibility["eligible"]:
-                    success = transfer_robux(user_id, amount)
-                    
-                    if success:
-                        c.execute('''
-                            UPDATE donations 
-                            SET status = 'completed', processed_at = CURRENT_TIMESTAMP
-                            WHERE id = ?
-                        ''', (donation['id'],))
-                        logger.info(f"Transfert réussi pour donation {donation['id']}")
-                    else:
-                        c.execute('''
-                            UPDATE donations 
-                            SET retry_count = retry_count + 1, last_retry = CURRENT_TIMESTAMP
-                            WHERE id = ?
-                        ''', (donation['id'],))
-                else:
-                    c.execute('''
-                        UPDATE donations 
-                        SET status = 'requeue', retry_count = retry_count + 1, last_retry = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                    ''', (donation['id'],))
-            
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            logger.error(f"Erreur check_donations: {e}")
-    
-    @discord.app_commands.command(name="donations_stats", description="Voir les statistiques des donations")
-    async def donations_stats(self, interaction: discord.Interaction):
-        """Afficher les statistiques de donations (ADMIN)"""
-        if not is_admin(interaction.user.id):
-            await interaction.response.send_message("❌ Vous n'avez pas les permissions.", ephemeral=True)
-            return
-        
-        await interaction.response.defer(thinking=True)
-        
-        try:
-            conn = get_db()
-            c = conn.cursor()
-            
-            c.execute('SELECT COALESCE(COUNT(*), 0) as total FROM donations')
-            total = c.fetchone()['total']
-            
-            c.execute('SELECT COALESCE(COUNT(*), 0) as pending FROM donations WHERE status = "pending"')
-            pending = c.fetchone()['pending']
-            
-            c.execute('SELECT COALESCE(COUNT(*), 0) as completed FROM donations WHERE status = "completed"')
-            completed = c.fetchone()['completed']
-            
-            c.execute('SELECT COALESCE(SUM(amount_robux), 0) as total_robux FROM donations')
-            total_robux = c.fetchone()['total_robux']
-            
-            c.execute('SELECT COALESCE(SUM(final_amount), 0) as final_robux FROM donations WHERE status = "completed"')
-            final_robux = c.fetchone()['final_robux']
-            
-            conn.close()
-            
-            embed = discord.Embed(
-                title="📊 Statistiques Donations",
-                color=discord.Color.blue(),
-                timestamp=datetime.now()
-            )
-            embed.add_field(name="Total donations", value=f"```{total}```", inline=True)
-            embed.add_field(name="En attente", value=f"```{pending}```", inline=True)
-            embed.add_field(name="Complétées", value=f"```{completed}```", inline=True)
-            embed.add_field(name="Robux total reçus", value=f"```{total_robux}```", inline=False)
-            embed.add_field(name="Robux transférés (net)", value=f"```{final_robux}```", inline=False)
-            
-            await interaction.followup.send(embed=embed)
-        except Exception as e:
-            logger.error(f"Erreur donations_stats: {e}")
-            await interaction.followup.send(f"❌ Erreur: {e}")
-
-
-async def setup_bot():
-    await bot.add_cog(DonationCog(bot))
-
-
-# ============================================================================
-# FLASK ROUTES (NON-BLOQUANTES)
+# FLASK ROUTES
 # ============================================================================
 
 @app.route('/webhook/devproduct', methods=['POST'])
@@ -404,7 +225,7 @@ def handle_devproduct_purchase():
             return jsonify({"error": "Unknown DevProduct"}), 400
         
         amount = DEVPRODUCT_AMOUNTS[devproduct_id]
-        final_amount = math.ceil(amount * (1 - TAX_RATE))  # ✅ Arrondir vers le haut
+        final_amount = math.ceil(amount * (1 - TAX_RATE))
         taxes = amount - final_amount
         
         conn = get_db()
@@ -421,23 +242,6 @@ def handle_devproduct_purchase():
         conn.close()
         
         logger.info(f"✅ Donation {donation_id} enregistrée: {user_id} -> {target_user_id} ({amount} Robux)")
-        
-        # Envoyer notification Discord (via cog)
-        cog = bot.get_cog("DonationCog")
-        if cog:
-            try:
-                player_info = get_user_info(user_id)
-                target_info = get_user_info(target_user_id)
-                
-                player_name = player_info.get("name", f"User {user_id}") if player_info else f"User {user_id}"
-                target_name = target_info.get("name", f"User {target_user_id}") if target_info else f"User {target_user_id}"
-                
-                asyncio.run_coroutine_threadsafe(
-                    cog.send_donation_notification(player_name, target_name, amount, final_amount, taxes),
-                    bot.loop
-                )
-            except Exception as e:
-                logger.error(f"Erreur notification Discord: {e}")
         
         return jsonify({
             "success": True,
@@ -479,6 +283,44 @@ def get_donation_status(donation_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/list', methods=['GET'])
+def list_donations():
+    """Lister toutes les donations"""
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        c.execute('''
+            SELECT * FROM donations 
+            ORDER BY created_at DESC 
+            LIMIT 50
+        ''')
+        
+        donations = c.fetchall()
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "count": len(donations),
+            "donations": [
+                {
+                    "id": d['id'],
+                    "playerId": d['player_id'],
+                    "targetId": d['target_player_id'],
+                    "amount": d['amount_robux'],
+                    "finalAmount": d['final_amount'],
+                    "status": d['status'],
+                    "createdAt": d['created_at'],
+                    "processedAt": d['processed_at']
+                }
+                for d in donations
+            ]
+        }), 200
+    except Exception as e:
+        logger.error(f"Erreur list_donations: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check pour monitoring"""
@@ -496,6 +338,7 @@ def index():
         "endpoints": {
             "webhook": "/webhook/devproduct (POST)",
             "status": "/status/<donation_id> (GET)",
+            "list": "/list (GET)",
             "health": "/health (GET)"
         }
     }), 200
@@ -507,17 +350,8 @@ def index():
 
 init_db()
 
-async def bot_startup():
-    await setup_bot()
-    await bot.start(DISCORD_TOKEN)
-
-def run_bot():
-    asyncio.new_event_loop().run_until_complete(bot_startup())
-
-bot_thread = threading.Thread(target=run_bot, daemon=True)
-bot_thread.start()
-
-logger.info("✅ Flask + Discord Bot en cours de démarrage...")
+logger.info("✅ API Donation en cours de démarrage...")
+logger.info(f"🔧 DevProducts configurés: {list(DEVPRODUCT_AMOUNTS.keys())}")
 
 if __name__ == '__main__':
     app.run(
