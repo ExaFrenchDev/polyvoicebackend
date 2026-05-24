@@ -7,23 +7,30 @@ import logging
 import requests
 import math
 import json
+import base64
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
+
+try:
+    import pyotp
+    PYOTP_AVAILABLE = True
+except ImportError:
+    PYOTP_AVAILABLE = False
 
 load_dotenv()
 
 app = Flask(__name__)
 
 # Configuration
-WEBHOOK_SECRET    = os.getenv("WEBHOOK_SECRET", "")
-GROUP_ID          = int(os.getenv("GROUP_ID", "0"))
-ACCOUNT_COOKIE    = os.getenv("ROBLOX_ACCOUNT_COOKIE", "")
-ROBLOX_API_KEY    = os.getenv("ROBLOX_API_KEY", "")
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
-ADMIN_PASSWORD    = os.getenv("ADMIN_PASSWORD", "exa14170.")
-
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+WEBHOOK_SECRET       = os.getenv("WEBHOOK_SECRET", "")
+GROUP_ID             = int(os.getenv("GROUP_ID", "0"))
+ACCOUNT_COOKIE       = os.getenv("ROBLOX_ACCOUNT_COOKIE", "")
+ROBLOX_2FA_SECRET    = os.getenv("ROBLOX_2FA_SECRET", "")
+ROBLOX_API_KEY       = os.getenv("ROBLOX_API_KEY", "")
+DISCORD_WEBHOOK_URL  = os.getenv("DISCORD_WEBHOOK_URL", "")
+ADMIN_PASSWORD       = os.getenv("ADMIN_PASSWORD", "exa14170.")
+DATABASE_URL         = os.getenv("DATABASE_URL", "")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -71,6 +78,241 @@ def init_db():
     c.close()
     conn.close()
     logger.info("✅ Table donations prête (Supabase/PostgreSQL)")
+
+
+# ============================================================================
+# ROBLOX PAYOUT — RobloxPayout Class (GitHub integration)
+# ============================================================================
+
+class RobloxPayout:
+    """
+    Gère les transferts Robux avec support automatique :
+    - Chef challenge
+    - 2FA TOTP (génération auto depuis secret)
+    - Fallback retry avec différents headers
+    """
+    def __init__(self, roblosecurity, group_id, twofactor_secret=""):
+        self.roblosecurity = roblosecurity
+        self.group_id = group_id
+        self.twofactor_secret = twofactor_secret
+        self.headers = {
+            'Cookie': '.ROBLOSECURITY=' + self.roblosecurity,
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0'
+        }
+
+    def _get_totp(self):
+        if not PYOTP_AVAILABLE or not self.twofactor_secret:
+            return None
+        try:
+            return pyotp.TOTP(self.twofactor_secret).now()
+        except Exception as e:
+            logger.error(f"[2FA] Erreur TOTP: {e}")
+            return None
+
+    def _set_csrf(self):
+        try:
+            r = requests.post("https://auth.roblox.com/v2/logout", headers=self.headers, timeout=5)
+            if r.status_code == 401:
+                logger.error("[Cookie] Cookie invalide (401)")
+                return False
+            token = r.headers.get('X-CSRF-TOKEN') or r.headers.get('x-csrf-token')
+            if token:
+                self.headers['X-CSRF-TOKEN'] = token
+            return True
+        except Exception as e:
+            logger.error(f"[Cookie] Erreur CSRF: {e}")
+            return False
+
+    def _payout_request(self, user_id, amount, extra_headers=None):
+        h = self.headers.copy()
+        if extra_headers:
+            h.update(extra_headers)
+        return requests.post(
+            f"https://groups.roblox.com/v1/groups/{self.group_id}/payouts",
+            headers=h,
+            json={
+                "PayoutType": 1,
+                "Recipients": [{"amount": amount, "recipientId": user_id, "recipientType": 0}]
+            },
+            timeout=10
+        )
+
+    def _verify_totp(self, sender_id, challenge_id):
+        code = self._get_totp()
+        if not code:
+            logger.error("[2FA] Pas de TOTP disponible")
+            return None
+        try:
+            r = requests.post(
+                f"https://twostepverification.roblox.com/v1/users/{sender_id}/challenges/authenticator/verify",
+                headers=self.headers,
+                json={"actionType": "Generic", "challengeId": challenge_id, "code": code},
+                timeout=10
+            )
+            data = r.json()
+            if "errors" in data:
+                logger.error(f"[2FA] Erreur verify: {data['errors'][0]['message']}")
+                return None
+            return data.get("verificationToken")
+        except Exception as e:
+            logger.error(f"[2FA] Erreur requête verify: {e}")
+            return None
+
+    def _continue_challenge(self, challenge_id, challenge_type, metadata):
+        try:
+            return requests.post(
+                "https://apis.roblox.com/challenge/v1/continue",
+                headers=self.headers,
+                json={"challengeId": challenge_id, "challengeType": challenge_type, "challengeMetadata": json.dumps(metadata)},
+                timeout=10
+            )
+        except Exception as e:
+            logger.error(f"[Challenge] Erreur continue: {e}")
+            return None
+
+    def payout(self, user_id, amount):
+        """Effectue un payout avec gestion automatique des challenges."""
+        if not self._set_csrf():
+            return False, "Cookie invalide ou expiré"
+
+        logger.info(f"[Cookie] Tentative payout: {amount} R$ → {user_id}")
+        r = self._payout_request(user_id, amount)
+
+        if r.status_code == 200:
+            logger.info(f"✅ [Cookie] Payout réussi sans challenge")
+            return True, "ok"
+
+        challenge_type = r.headers.get("rblx-challenge-type", "").lower()
+        challenge_id = r.headers.get("rblx-challenge-id", "")
+        challenge_meta_b64 = r.headers.get("rblx-challenge-metadata", "")
+
+        if not challenge_type or not challenge_id:
+            logger.error(f"[Cookie] Pas de challenge headers — HTTP {r.status_code}: {r.text}")
+            return False, f"No challenge headers (HTTP {r.status_code})"
+
+        # ── CHEF CHALLENGE ──────────────────────────────────────────────────
+        if challenge_type == "chef":
+            logger.info("[Cookie] Chef challenge détecté")
+            try:
+                chef_meta = json.loads(base64.b64decode(challenge_meta_b64))
+            except Exception as e:
+                logger.error(f"[Chef] Erreur decode metadata: {e}")
+                return False, "Chef metadata decode failed"
+
+            cont = self._continue_challenge(challenge_id, "chef", chef_meta)
+            if not cont:
+                return False, "Chef continue failed"
+            
+            cont_data = cont.json()
+            next_type = cont_data.get("challengeType", "")
+            next_meta_raw = cont_data.get("challengeMetadata", "")
+
+            if next_type == "":
+                # Chef passé, retry sans 2FA
+                logger.info("[Chef] Passé sans 2FA, retry payout...")
+                final = self._payout_request(user_id, amount, {
+                    "rblx-challenge-id": challenge_id,
+                    "rblx-challenge-type": "twostepverification",
+                    "rblx-challenge-metadata": challenge_meta_b64
+                })
+
+            elif next_type == "twostepverification":
+                # Chef → 2FA
+                logger.info("[Chef] Unlock 2FA required")
+                try:
+                    tfa_meta = json.loads(next_meta_raw)
+                    tfa_user = tfa_meta["userId"]
+                    tfa_cid = tfa_meta["challengeId"]
+                except Exception as e:
+                    logger.error(f"[2FA] Erreur parse metadata: {e}")
+                    return False, "2FA metadata parse failed"
+
+                vtoken = self._verify_totp(tfa_user, tfa_cid)
+                if not vtoken:
+                    return False, "2FA TOTP verification failed"
+
+                tfa_meta["verificationToken"] = vtoken
+                tfa_meta["rememberDevice"] = False
+                self._continue_challenge(challenge_id, "twostepverification", tfa_meta)
+
+                tfa_proof = base64.b64encode(json.dumps({
+                    "rememberDevice": False,
+                    "actionType": "Generic",
+                    "verificationToken": vtoken,
+                    "challengeId": tfa_cid
+                }).encode()).decode()
+
+                logger.info("[Chef+2FA] Retry payout avec preuve...")
+                final = self._payout_request(user_id, amount, {
+                    "rblx-challenge-id": challenge_id,
+                    "rblx-challenge-type": "twostepverification",
+                    "rblx-challenge-metadata": tfa_proof
+                })
+
+                # Fallback si twostepverification échoue
+                if final.status_code != 200:
+                    logger.warning("[Chef+2FA] Retry twostep échoué, fallback chef...")
+                    final = self._payout_request(user_id, amount, {
+                        "rblx-challenge-id": challenge_id,
+                        "rblx-challenge-type": "chef",
+                        "rblx-challenge-metadata": challenge_meta_b64
+                    })
+
+            elif next_type == "blocksession":
+                logger.error("[Chef] Session bloquée (AutomatedTampering)")
+                return False, "Session bloquée — réessayez dans 1 minute"
+            else:
+                logger.error(f"[Chef] Challenge inconnu: {next_type}")
+                return False, f"Unknown challenge: {next_type}"
+
+            if final.status_code == 200:
+                logger.info("✅ [Chef] Payout réussi après chef!")
+                return True, "ok"
+            else:
+                logger.error(f"❌ [Chef] Payout échoué après chef: {final.text}")
+                return False, final.text
+
+        # ── TWOSTEPVERIFICATION DIRECT ──────────────────────────────────────
+        elif challenge_type == "twostepverification":
+            logger.info("[2FA] 2FA directe (pas chef)")
+            try:
+                meta = json.loads(base64.b64decode(challenge_meta_b64))
+                sender = meta["userId"]
+                cid = meta["challengeId"]
+            except Exception as e:
+                logger.error(f"[2FA] Erreur parse metadata: {e}")
+                return False, "2FA metadata parse failed"
+
+            vtoken = self._verify_totp(sender, cid)
+            if not vtoken:
+                return False, "2FA TOTP verification failed"
+
+            tfa_proof = {
+                "rememberDevice": False,
+                "actionType": "Generic",
+                "verificationToken": vtoken,
+                "challengeId": cid
+            }
+            self._continue_challenge(challenge_id, "twostepverification", tfa_proof)
+
+            final = self._payout_request(user_id, amount, {
+                'rblx-challenge-id': challenge_id,
+                'rblx-challenge-metadata': base64.b64encode(json.dumps(tfa_proof).encode()).decode(),
+                'rblx-challenge-type': "twostepverification"
+            })
+            if final.status_code == 200:
+                logger.info("✅ [2FA] Payout réussi après 2FA!")
+                return True, "ok"
+            else:
+                logger.error(f"❌ [2FA] Payout échoué après 2FA: {final.text}")
+                return False, final.text
+
+        elif challenge_type == "blocksession":
+            logger.error("[Cookie] Session bloquée sur première requête")
+            return False, "Session bloquée — réessayez dans 1 minute"
+        else:
+            logger.error(f"[Cookie] Challenge inconnu: {challenge_type}")
+            return False, f"Unknown challenge: {challenge_type}"
 
 
 # ============================================================================
@@ -130,107 +372,73 @@ def check_eligibility(user_id, group_id, days_required=MIN_GROUP_TENURE_DAYS):
 def transfer_robux_opencloud(target_user_id, amount_robux):
     """
     Transfert via Roblox Open Cloud API (clé API) — pas de challenge.
-    Endpoint: POST https://apis.roblox.com/cloud/v2/groups/{groupId}/payouts
     """
     headers = {
         "x-api-key": ROBLOX_API_KEY,
         "Content-Type": "application/json",
     }
     payload = {
-        "payouts": [
-            {
-                "userId": str(target_user_id),
-                "amount": amount_robux
-            }
-        ]
+        "payouts": [{"userId": str(target_user_id), "amount": amount_robux}]
     }
     logger.info(f"[OpenCloud] Tentative: {amount_robux} R$ → user {target_user_id}")
-    response = requests.post(
-        f"https://apis.roblox.com/cloud/v2/groups/{GROUP_ID}/payouts",
-        json=payload,
-        headers=headers,
-        timeout=10
-    )
-    roblox_proof = {
-        "method": "open_cloud",
-        "endpoint": f"cloud/v2/groups/{GROUP_ID}/payouts",
-        "recipientId": target_user_id,
-        "amountSent": amount_robux,
-        "httpStatus": response.status_code,
-        "response": response.json() if response.content else {},
-        "timestamp": datetime.utcnow().isoformat() + "Z"
-    }
-    if response.status_code == 200:
-        logger.info(f"✅ [OpenCloud] Payout réussi: {amount_robux} R$ → {target_user_id}")
-        return True, roblox_proof
-    else:
-        logger.error(f"❌ [OpenCloud] Payout failed: {response.status_code} — {response.text}")
-        return False, roblox_proof
-
-
-def transfer_robux_legacy(target_user_id, amount_robux):
-    """
-    Fallback : transfert via cookie .ROBLOSECURITY + CSRF token.
-    """
-    session = requests.Session()
-    session.cookies.set('.ROBLOSECURITY', ACCOUNT_COOKIE)
-
-    csrf_response = session.get('https://www.roblox.com/home', timeout=5)
-    csrf_token = csrf_response.headers.get('X-CSRF-TOKEN', '')
-
-    if not csrf_token:
-        csrf_response = session.post(
-            'https://auth.roblox.com/v2/logout',
-            headers={'X-CSRF-TOKEN': ''},
-            timeout=5
+    try:
+        response = requests.post(
+            f"https://apis.roblox.com/cloud/v2/groups/{GROUP_ID}/payouts",
+            json=payload, headers=headers, timeout=10
         )
-        csrf_token = csrf_response.headers.get('X-CSRF-TOKEN', '')
+        roblox_proof = {
+            "method": "open_cloud",
+            "endpoint": f"cloud/v2/groups/{GROUP_ID}/payouts",
+            "recipientId": target_user_id,
+            "amountSent": amount_robux,
+            "httpStatus": response.status_code,
+            "response": response.json() if response.content else {},
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        if response.status_code == 200:
+            logger.info(f"✅ [OpenCloud] Réussi: {amount_robux} R$ → {target_user_id}")
+            return True, roblox_proof
+        else:
+            logger.error(f"❌ [OpenCloud] HTTP {response.status_code}: {response.text}")
+            return False, roblox_proof
+    except Exception as e:
+        logger.error(f"❌ [OpenCloud] Exception: {e}")
+        return False, {"error": str(e), "timestamp": datetime.utcnow().isoformat() + "Z"}
 
-    headers = {
-        'X-CSRF-TOKEN': csrf_token,
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-    }
-    payload = {
-        "PayoutType": "FixedAmount",
-        "Recipients": [{"recipientId": target_user_id, "recipientType": "User", "amount": amount_robux}]
-    }
-    logger.info(f"[Legacy] Tentative: {amount_robux} R$ → user {target_user_id}")
-    response = session.post(
-        f'https://groups.roblox.com/v1/groups/{GROUP_ID}/payouts',
-        json=payload, headers=headers, timeout=10
-    )
-    roblox_proof = {
-        "method": "legacy_cookie",
+
+def transfer_robux_cookie_2fa(target_user_id, amount_robux):
+    """
+    Transfert via cookie + 2FA TOTP automatique.
+    """
+    payout = RobloxPayout(ACCOUNT_COOKIE, GROUP_ID, ROBLOX_2FA_SECRET)
+    success, detail = payout.payout(target_user_id, amount_robux)
+    proof = {
+        "method": "cookie_2fa" if ROBLOX_2FA_SECRET else "cookie_only",
         "endpoint": f"groups/{GROUP_ID}/payouts",
         "recipientId": target_user_id,
         "amountSent": amount_robux,
-        "httpStatus": response.status_code,
-        "response": response.json() if response.content else {},
+        "httpStatus": 200 if success else 403,
+        "response": {"detail": detail},
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
-    if response.status_code == 200:
-        logger.info(f"✅ [Legacy] Payout réussi: {amount_robux} R$ → {target_user_id}")
-        return True, roblox_proof
-    else:
-        logger.error(f"❌ [Legacy] Payout failed: {response.status_code} — {response.text}")
-        return False, roblox_proof
+    return success, proof
 
 
 def transfer_robux(target_user_id, amount_robux):
     """
-    Essaie Open Cloud en priorité, puis fallback Legacy cookie.
+    1. Essaie Open Cloud API
+    2. Fallback Cookie + 2FA automatique
     """
     if ROBLOX_API_KEY:
         success, proof = transfer_robux_opencloud(target_user_id, amount_robux)
         if success:
             return True, proof
-        logger.warning("[Payout] Open Cloud échoué, tentative fallback Legacy...")
+        logger.warning("[Payout] Open Cloud échoué, fallback Cookie+2FA...")
 
     if ACCOUNT_COOKIE:
-        return transfer_robux_legacy(target_user_id, amount_robux)
+        return transfer_robux_cookie_2fa(target_user_id, amount_robux)
 
-    logger.error("[Payout] Aucune méthode disponible (ni API key ni cookie)")
+    logger.error("[Payout] Aucune méthode configurée (ni API key ni cookie)")
     return False, {"error": "No auth method configured", "timestamp": datetime.utcnow().isoformat() + "Z"}
 
 
@@ -1065,11 +1273,13 @@ if DATABASE_URL:
     except Exception as e:
         logger.error(f"❌ Erreur connexion DB: {e}")
 else:
-    logger.warning("⚠️ DATABASE_URL non configurée — ajoute-la dans les env vars Render")
+    logger.warning("⚠️ DATABASE_URL non configurée")
 
 logger.info(f"🔧 DevProducts: {list(DEVPRODUCT_AMOUNTS.keys())}")
-logger.info(f"🔑 Roblox API Key: {'OK (Open Cloud)' if ROBLOX_API_KEY else 'non configurée (fallback cookie)'}")
-logger.info(f"🔔 Discord: {'OK' if DISCORD_WEBHOOK_URL else 'non configuré'}")
+logger.info(f"🔑 Roblox API Key: {'✅ OK (Open Cloud)' if ROBLOX_API_KEY else '❌ non configurée'}")
+logger.info(f"🍪 Cookie Roblox:  {'✅ OK' if ACCOUNT_COOKIE else '❌ non configuré'}")
+logger.info(f"🔐 2FA TOTP:       {'✅ OK (pyotp)' if ROBLOX_2FA_SECRET and PYOTP_AVAILABLE else '❌ non configuré'}")
+logger.info(f"🔔 Discord:        {'✅ OK' if DISCORD_WEBHOOK_URL else '❌ non configuré'}")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False, use_reloader=False)
