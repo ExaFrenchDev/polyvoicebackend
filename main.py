@@ -13,6 +13,7 @@ import logging
 import requests
 from concurrent.futures import ThreadPoolExecutor
 import queue
+import math
 
 load_dotenv()
 
@@ -235,7 +236,6 @@ class DonationCog(commands.Cog):
         self.bot = bot
         self.channel_id = DISCORD_CHANNEL_ID
         self.check_donations.start()
-        self.process_notifications.start()
     
     @commands.Cog.listener()
     async def on_ready(self):
@@ -246,20 +246,29 @@ class DonationCog(commands.Cog):
         except Exception as e:
             logger.error(f"❌ Erreur sync commands: {e}")
     
-    @tasks.loop(seconds=5)  # Vérifie la queue toutes les 5 secondes
-    async def process_notifications(self):
-        """Traiter les notifications en queue (NON-BLOQUANT)"""
+    async def send_donation_notification(self, player_name, target_name, amount, final_amount, taxes):
+        """Envoyer une notification Discord"""
         try:
-            while not notification_queue.empty():
-                notification_data = notification_queue.get_nowait()
-                channel = self.bot.get_channel(DISCORD_CHANNEL_ID)
-                if channel:
-                    embed = notification_data["embed"]
-                    await channel.send(embed=embed)
-        except queue.Empty:
-            pass
+            channel = self.bot.get_channel(DISCORD_CHANNEL_ID)
+            if not channel:
+                logger.error("Canal Discord non trouvé")
+                return
+            
+            embed = discord.Embed(
+                title="💰 Nouvelle Donation!",
+                color=discord.Color.gold(),
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="Donateur", value=f"```{player_name}```", inline=False)
+            embed.add_field(name="Pour", value=f"```{target_name}```", inline=True)
+            embed.add_field(name="Montant", value=f"```{amount} Robux```", inline=True)
+            embed.add_field(name="Après taxes (-40%)", value=f"```{final_amount} Robux```", inline=True)
+            embed.add_field(name="Taxes Roblox", value=f"```{taxes} Robux```", inline=False)
+            
+            await channel.send(embed=embed)
+            logger.info(f"✅ Notification Discord envoyée")
         except Exception as e:
-            logger.error(f"Erreur traitement notification: {e}")
+            logger.error(f"Erreur send_donation_notification: {e}")
     
     @tasks.loop(minutes=30)
     async def check_donations(self):
@@ -328,20 +337,20 @@ class DonationCog(commands.Cog):
             conn = get_db()
             c = conn.cursor()
             
-            c.execute('SELECT COUNT(*) as total FROM donations')
+            c.execute('SELECT COALESCE(COUNT(*), 0) as total FROM donations')
             total = c.fetchone()['total']
             
-            c.execute('SELECT COUNT(*) as pending FROM donations WHERE status = "pending"')
+            c.execute('SELECT COALESCE(COUNT(*), 0) as pending FROM donations WHERE status = "pending"')
             pending = c.fetchone()['pending']
             
-            c.execute('SELECT COUNT(*) as completed FROM donations WHERE status = "completed"')
+            c.execute('SELECT COALESCE(COUNT(*), 0) as completed FROM donations WHERE status = "completed"')
             completed = c.fetchone()['completed']
             
-            c.execute('SELECT SUM(amount_robux) as total_robux FROM donations')
-            total_robux = c.fetchone()['total_robux'] or 0
+            c.execute('SELECT COALESCE(SUM(amount_robux), 0) as total_robux FROM donations')
+            total_robux = c.fetchone()['total_robux']
             
-            c.execute('SELECT SUM(final_amount) as final_robux FROM donations WHERE status = "completed"')
-            final_robux = c.fetchone()['final_robux'] or 0
+            c.execute('SELECT COALESCE(SUM(final_amount), 0) as final_robux FROM donations WHERE status = "completed"')
+            final_robux = c.fetchone()['final_robux']
             
             conn.close()
             
@@ -395,7 +404,7 @@ def handle_devproduct_purchase():
             return jsonify({"error": "Unknown DevProduct"}), 400
         
         amount = DEVPRODUCT_AMOUNTS[devproduct_id]
-        final_amount = int(amount * (1 - TAX_RATE))
+        final_amount = math.ceil(amount * (1 - TAX_RATE))  # ✅ Arrondir vers le haut
         taxes = amount - final_amount
         
         conn = get_db()
@@ -413,18 +422,22 @@ def handle_devproduct_purchase():
         
         logger.info(f"✅ Donation {donation_id} enregistrée: {user_id} -> {target_user_id} ({amount} Robux)")
         
-        # Ajouter à la queue pour notification Discord (asynchrone)
-        embed = discord.Embed(
-            title="💰 Nouvelle Donation!",
-            color=discord.Color.gold(),
-            timestamp=datetime.now()
-        )
-        embed.add_field(name="Donateur", value=f"```{user_id}```", inline=False)
-        embed.add_field(name="Pour", value=f"```{target_user_id}```", inline=True)
-        embed.add_field(name="Montant", value=f"```{amount} Robux```", inline=True)
-        embed.add_field(name="Après taxes (-40%)", value=f"```{final_amount} Robux```", inline=True)
-        
-        notification_queue.put({"embed": embed})
+        # Envoyer notification Discord (via cog)
+        cog = bot.get_cog("DonationCog")
+        if cog:
+            try:
+                player_info = get_user_info(user_id)
+                target_info = get_user_info(target_user_id)
+                
+                player_name = player_info.get("name", f"User {user_id}") if player_info else f"User {user_id}"
+                target_name = target_info.get("name", f"User {target_user_id}") if target_info else f"User {target_user_id}"
+                
+                asyncio.run_coroutine_threadsafe(
+                    cog.send_donation_notification(player_name, target_name, amount, final_amount, taxes),
+                    bot.loop
+                )
+            except Exception as e:
+                logger.error(f"Erreur notification Discord: {e}")
         
         return jsonify({
             "success": True,
