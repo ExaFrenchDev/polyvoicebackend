@@ -5,14 +5,12 @@ import sqlite3
 import hashlib
 import hmac
 import asyncio
-import aiohttp
+import threading
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands, tasks
 import logging
 import requests
-import json
-from http.cookies import SimpleCookie
 
 load_dotenv()
 
@@ -26,14 +24,11 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 GROUP_ID = int(os.getenv("GROUP_ID"))
 ACCOUNT_COOKIE = os.getenv("ROBLOX_ACCOUNT_COOKIE")
 DATABASE_PATH = "donations.db"
-
-# Admin Discord IDs (à configurer dans .env)
 ADMIN_DISCORD_IDS = list(map(int, os.getenv("ADMIN_DISCORD_IDS", "").split(","))) if os.getenv("ADMIN_DISCORD_IDS") else []
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# DevProduct IDs mapping
 DEVPRODUCT_AMOUNTS = {
     "123456": 5,
     "123457": 10,
@@ -51,7 +46,7 @@ MIN_GROUP_TENURE_DAYS = 7
 
 
 # ============================================================================
-# DATABASE SETUP
+# DATABASE
 # ============================================================================
 
 def init_db():
@@ -95,7 +90,7 @@ def get_db():
 
 
 # ============================================================================
-# PERMISSION HELPERS
+# PERMISSIONS
 # ============================================================================
 
 def is_admin(user_id):
@@ -104,7 +99,7 @@ def is_admin(user_id):
 
 
 async def admin_only(ctx):
-    """Decorator pour vérifier les permissions admin"""
+    """Vérifier les permissions admin"""
     if not is_admin(ctx.author.id):
         await ctx.send("❌ Vous n'avez pas les permissions pour cette commande.")
         return False
@@ -112,7 +107,7 @@ async def admin_only(ctx):
 
 
 # ============================================================================
-# ROBLOX API FUNCTIONS
+# ROBLOX API
 # ============================================================================
 
 def verify_webhook_signature(data, signature):
@@ -126,7 +121,7 @@ def verify_webhook_signature(data, signature):
 
 
 def get_user_info(user_id):
-    """Récupérer les infos utilisateur Roblox via l'API"""
+    """Récupérer les infos utilisateur Roblox"""
     try:
         resp = requests.get(f"https://users.roblox.com/v1/users/{user_id}")
         if resp.status_code == 200:
@@ -137,7 +132,7 @@ def get_user_info(user_id):
 
 
 def get_group_membership(user_id, group_id):
-    """Vérifier si l'utilisateur est dans le groupe et depuis quand"""
+    """Vérifier si l'utilisateur est dans le groupe"""
     try:
         resp = requests.get(f"https://groups.roblox.com/v1/users/{user_id}/groups")
         if resp.status_code == 200:
@@ -156,7 +151,7 @@ def get_group_membership(user_id, group_id):
 
 
 def check_eligibility(user_id, group_id, days_required=MIN_GROUP_TENURE_DAYS):
-    """Vérifier si un joueur est éligible pour le transfert"""
+    """Vérifier si un joueur est éligible"""
     membership = get_group_membership(user_id, group_id)
     
     if not membership.get("in_group"):
@@ -176,7 +171,7 @@ def check_eligibility(user_id, group_id, days_required=MIN_GROUP_TENURE_DAYS):
 
 
 def transfer_robux(target_user_id, amount_robux):
-    """Transférer les Robux au joueur via le compte bot"""
+    """Transférer les Robux au joueur"""
     try:
         session = requests.Session()
         session.cookies.set('.ROBLOSECURITY', ACCOUNT_COOKIE)
@@ -222,12 +217,13 @@ def transfer_robux(target_user_id, amount_robux):
 
 
 # ============================================================================
-# DISCORD BOT WITH COMMANDS
+# DISCORD BOT
 # ============================================================================
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+
 
 class DonationCog(commands.Cog):
     def __init__(self, bot):
@@ -237,10 +233,10 @@ class DonationCog(commands.Cog):
     
     @commands.Cog.listener()
     async def on_ready(self):
-        logger.info(f"Discord bot connecté: {self.bot.user}")
+        logger.info(f"✅ Discord bot connecté: {self.bot.user}")
     
     async def send_donation_notification(self, player_name, target_name, amount, final_amount, taxes):
-        """Envoyer une notification Discord pour une nouvelle donation"""
+        """Envoyer une notification Discord"""
         channel = self.bot.get_channel(DISCORD_CHANNEL_ID)
         if not channel:
             logger.error("Canal Discord non trouvé")
@@ -256,7 +252,6 @@ class DonationCog(commands.Cog):
         embed.add_field(name="Montant", value=f"```{amount} Robux```", inline=True)
         embed.add_field(name="Après taxes (-40%)", value=f"```{final_amount} Robux```", inline=True)
         embed.add_field(name="Taxes Roblox", value=f"```{taxes} Robux```", inline=False)
-        embed.set_footer(text=f"ID de la donation: {datetime.now().timestamp()}")
         
         await channel.send(embed=embed)
     
@@ -359,7 +354,6 @@ class DonationCog(commands.Cog):
         embed.add_field(name="Complétées", value=f"```{completed}```", inline=True)
         embed.add_field(name="Robux total reçus", value=f"```{total_robux}```", inline=False)
         embed.add_field(name="Robux transférés (net)", value=f"```{final_robux}```", inline=False)
-        embed.set_footer(text="Données en direct")
         
         await ctx.send(embed=embed)
     
@@ -492,7 +486,7 @@ class DonationCog(commands.Cog):
     
     @commands.command(name="force_check")
     async def force_check(self, ctx):
-        """Forcer la vérification immédiate des donations (ADMIN)"""
+        """Forcer la vérification immédiate (ADMIN)"""
         if not await admin_only(ctx):
             return
         
@@ -500,9 +494,10 @@ class DonationCog(commands.Cog):
         await self.check_donations()
         await ctx.send("✅ Vérification terminée")
 
-# Ajouter le Cog au bot
+
 async def setup_bot():
     await bot.add_cog(DonationCog(bot))
+
 
 # ============================================================================
 # FLASK ROUTES
@@ -623,14 +618,12 @@ def index():
 if __name__ == '__main__':
     init_db()
     
-    import threading
-    
     async def bot_startup():
         await setup_bot()
         await bot.start(DISCORD_TOKEN)
     
     def run_bot():
-        asyncio.run(bot_startup())
+        asyncio.new_event_loop().run_until_complete(bot_startup())
     
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
