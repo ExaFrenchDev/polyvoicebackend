@@ -20,7 +20,11 @@ GROUP_ID = int(os.getenv("GROUP_ID", "0"))
 ACCOUNT_COOKIE = os.getenv("ROBLOX_ACCOUNT_COOKIE", "")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "exa14170.")
-DATABASE_PATH = "donations.db"
+
+# ✅ FIX: Persistent disk path for Render
+# On Render, mount a Persistent Disk at /data
+# In your Render dashboard: Settings > Disks > Add Disk > Mount Path: /data
+DATABASE_PATH = os.getenv("DATABASE_PATH", "/data/donations.db")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,6 +45,14 @@ MIN_GROUP_TENURE_DAYS = 7
 # ============================================================================
 
 def init_db():
+    # Ensure the directory exists (for /data on Render)
+    db_dir = os.path.dirname(DATABASE_PATH)
+    if db_dir and not os.path.exists(db_dir):
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+        except Exception:
+            pass  # fallback to local if /data not available
+
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
     c.execute('''
@@ -59,7 +71,6 @@ def init_db():
             discord_message_id TEXT
         )
     ''')
-    # Migration: ajouter discord_message_id si la table existait déjà sans cette colonne
     try:
         c.execute('ALTER TABLE donations ADD COLUMN discord_message_id TEXT')
         logger.info("✅ Colonne discord_message_id ajoutée")
@@ -67,6 +78,7 @@ def init_db():
         pass
     conn.commit()
     conn.close()
+    logger.info(f"✅ Database initialisée: {DATABASE_PATH}")
 
 
 def get_db():
@@ -134,7 +146,6 @@ def transfer_robux(target_user_id, amount_robux):
         session = requests.Session()
         session.cookies.set('.ROBLOSECURITY', ACCOUNT_COOKIE)
 
-        # Récupérer le CSRF token
         csrf_response = session.post('https://auth.roblox.com/v2/logout', timeout=5)
         csrf_token = csrf_response.headers.get('x-csrf-token', '')
 
@@ -189,7 +200,6 @@ def transfer_robux(target_user_id, amount_robux):
 
 def send_discord_notification(donor_id, donor_name, target_id, target_name,
                                amount, final_amount, taxes, donation_id, estimated_date):
-    """Envoie l'embed initial et retourne le message_id Discord"""
     if not DISCORD_WEBHOOK_URL:
         logger.warning("⚠️ DISCORD_WEBHOOK_URL non configurée")
         return None
@@ -201,7 +211,7 @@ def send_discord_notification(donor_id, donor_name, target_id, target_name,
             {"name": "👤 Donateur",          "value": f"`{donor_name}` (ID: `{donor_id}`)",  "inline": False},
             {"name": "🎯 Receveur",           "value": f"`{target_name}` (ID: `{target_id}`)", "inline": False},
             {"name": "💵 Montant brut",       "value": f"`{amount} Robux`",                   "inline": True},
-            {"name": f"🏦 Taxe Roblox (-{TAX_RATE * 100}%)", "value": f"`{taxes} Robux`",                    "inline": True},
+            {"name": f"🏦 Taxe Roblox (-{TAX_RATE * 100}%)", "value": f"`{taxes} Robux`",    "inline": True},
             {"name": "✨ Montant net",         "value": f"`{final_amount} Robux`",             "inline": True},
             {"name": "📅 Transfert prévu le", "value": f"`{estimated_date}`",                 "inline": False},
             {"name": "🔖 ID Donation",        "value": f"`#{donation_id}`",                   "inline": True},
@@ -231,12 +241,10 @@ def send_discord_notification(donor_id, donor_name, target_id, target_name,
 
 def edit_discord_success(message_id, donor_name, donor_id, target_name, target_id,
                           amount, final_amount, taxes, donation_id, roblox_proof):
-    """Édite l'embed pour confirmer le transfert avec preuve Roblox"""
     if not DISCORD_WEBHOOK_URL or not message_id:
         return
 
     proof_str = json.dumps(roblox_proof, indent=2, ensure_ascii=False)
-    # Discord limite les fields à 1024 chars
     if len(proof_str) > 950:
         proof_str = proof_str[:950] + "\n... (tronqué)"
 
@@ -247,7 +255,7 @@ def edit_discord_success(message_id, donor_name, donor_id, target_name, target_i
             {"name": "👤 Donateur",            "value": f"`{donor_name}` (ID: `{donor_id}`)",   "inline": False},
             {"name": "🎯 Receveur",             "value": f"`{target_name}` (ID: `{target_id}`)", "inline": False},
             {"name": "💵 Montant brut",         "value": f"`{amount} Robux`",                    "inline": True},
-            {"name": f"🏦 Taxe Roblox (-{TAX_RATE * 100}%)",   "value": f"`{taxes} Robux`",                     "inline": True},
+            {"name": f"🏦 Taxe Roblox (-{TAX_RATE * 100}%)", "value": f"`{taxes} Robux`",       "inline": True},
             {"name": "✨ Montant reçu",          "value": f"`{final_amount} Robux`",              "inline": True},
             {"name": "🔖 ID Donation",          "value": f"`#{donation_id}`",                    "inline": True},
             {"name": "✅ Statut",                "value": "`Transféré`",                          "inline": True},
@@ -273,7 +281,6 @@ def edit_discord_success(message_id, donor_name, donor_id, target_name, target_i
 
 def edit_discord_failed(message_id, donor_name, donor_id, target_name, target_id,
                          amount, final_amount, donation_id, reason):
-    """Édite l'embed pour signaler un échec"""
     if not DISCORD_WEBHOOK_URL or not message_id:
         return
 
@@ -388,7 +395,6 @@ def get_pending_donations():
         ''', (cutoff_date,))
         donations = [dict(row) for row in c.fetchall()]
         conn.close()
-        logger.info(f"📋 /pending: {len(donations)} donation(s) retournée(s)")
         return jsonify({"success": True, "donations": donations}), 200
     except Exception as e:
         logger.error(f"Erreur get_pending_donations: {e}")
@@ -454,7 +460,6 @@ def update_donation_status(donation_id):
                 donation_id, fail_reason
             )
 
-        logger.info(f"✅ Donation {donation_id} mise à jour: {new_status}")
         return jsonify({"success": True}), 200
 
     except Exception as e:
@@ -525,294 +530,711 @@ def index():
         }
     }), 200
 
+
+# ============================================================================
+# ADMIN DASHBOARD — rebuilt from scratch, no ES6 destructuring
+# ============================================================================
+
 @app.route('/admin', methods=['GET'])
 def dashboard():
     password = request.args.get('password', '')
     if password != ADMIN_PASSWORD:
         return "Access denied", 403
-    
-    html = """<!DOCTYPE html>
-<html>
+
+    html = r"""<!DOCTYPE html>
+<html lang="fr">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: sans-serif; background: #f5f5f5; color: #333; }
-        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
-        .header { background: white; padding: 20px; margin-bottom: 20px; border-radius: 6px; display: flex; justify-content: space-between; }
-        .header h1 { font-size: 24px; font-weight: 600; }
-        .time { color: #666; }
-        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
-        .stat { background: white; padding: 20px; border-radius: 6px; border-left: 4px solid #ccc; }
-        .stat.total { border-left-color: #666; }
-        .stat.pending { border-left-color: #f59e0b; }
-        .stat.completed { border-left-color: #10b981; }
-        .stat.failed { border-left-color: #ef4444; }
-        .stat-label { font-size: 12px; color: #666; text-transform: uppercase; margin-bottom: 8px; }
-        .stat-value { font-size: 32px; font-weight: 700; }
-        .card { background: white; border-radius: 6px; overflow: hidden; }
-        .card-header { padding: 20px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
-        .card-title { font-size: 16px; font-weight: 600; }
-        .controls { display: flex; gap: 8px; }
-        button { padding: 8px 16px; border: none; border-radius: 4px; font-size: 13px; font-weight: 500; cursor: pointer; }
-        .btn-default { background: #f3f4f6; color: #333; border: 1px solid #e5e7eb; }
-        .btn-default:hover { background: #e5e7eb; }
-        .btn-success { background: #10b981; color: white; }
-        .btn-success:hover { background: #059669; }
-        .btn-danger { background: #ef4444; color: white; }
-        .btn-danger:hover { background: #dc2626; }
-        .table-wrapper { overflow-x: auto; }
-        table { width: 100%; border-collapse: collapse; }
-        thead { background: #f9fafb; }
-        th { padding: 12px 16px; text-align: left; font-weight: 600; color: #666; font-size: 12px; text-transform: uppercase; border-bottom: 1px solid #eee; }
-        td { padding: 12px 16px; border-bottom: 1px solid #f3f4f6; }
-        tbody tr:hover { background: #fafafa; }
-        .badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 11px; font-weight: 600; }
-        .badge-pending { background: #fef3c7; color: #92400e; }
-        .badge-completed { background: #d1fae5; color: #065f46; }
-        .badge-failed { background: #fee2e2; color: #991b1b; }
-        .actions { display: flex; gap: 4px; }
-        .actions button { padding: 4px 8px; font-size: 11px; }
-        .toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 4px; display: none; font-size: 13px; z-index: 1000; }
-        .toast.show { display: block; }
-        .toast.success { background: #10b981; color: white; }
-        .loading { text-align: center; padding: 40px; color: #999; }
-        .empty { text-align: center; padding: 60px 20px; color: #999; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PolyVoice — Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #111118;
+    --border: #1e1e2e;
+    --border-hi: #2a2a3e;
+    --text: #e2e2f0;
+    --muted: #6b6b8a;
+    --accent: #7c6af7;
+    --accent-glow: rgba(124,106,247,0.15);
+    --green: #22d3a0;
+    --green-bg: rgba(34,211,160,0.08);
+    --yellow: #f5c842;
+    --yellow-bg: rgba(245,200,66,0.08);
+    --red: #f05a5a;
+    --red-bg: rgba(240,90,90,0.08);
+    --blue: #60a5fa;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 14px;
+    min-height: 100vh;
+  }
+
+  /* GRID BACKGROUND */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(var(--border) 1px, transparent 1px),
+      linear-gradient(90deg, var(--border) 1px, transparent 1px);
+    background-size: 40px 40px;
+    opacity: 0.4;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .wrap { position: relative; z-index: 1; max-width: 1300px; margin: 0 auto; padding: 28px 24px; }
+
+  /* HEADER */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 32px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .logo {
+    display: flex; align-items: center; gap: 12px;
+  }
+  .logo-dot {
+    width: 10px; height: 10px;
+    background: var(--accent);
+    border-radius: 50%;
+    box-shadow: 0 0 10px var(--accent);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%,100% { opacity:1; } 50% { opacity:0.4; }
+  }
+  .logo-title {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: var(--text);
+  }
+  .logo-sub {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .topbar-right {
+    display: flex; align-items: center; gap: 20px;
+  }
+  .live-badge {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--green-bg);
+    border: 1px solid rgba(34,211,160,0.2);
+    padding: 5px 12px;
+    border-radius: 20px;
+    font-size: 11px;
+    color: var(--green);
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .live-dot {
+    width: 6px; height: 6px;
+    background: var(--green);
+    border-radius: 50%;
+    animation: pulse 1.5s infinite;
+  }
+  .clock {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  /* STATS */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin-bottom: 28px;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+  .stat-card:hover { border-color: var(--border-hi); }
+  .stat-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+  }
+  .stat-card.s-total::before { background: linear-gradient(90deg, var(--accent), transparent); }
+  .stat-card.s-pending::before { background: linear-gradient(90deg, var(--yellow), transparent); }
+  .stat-card.s-completed::before { background: linear-gradient(90deg, var(--green), transparent); }
+  .stat-card.s-failed::before { background: linear-gradient(90deg, var(--red), transparent); }
+  .stat-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    margin-bottom: 12px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .stat-value {
+    font-size: 38px;
+    font-weight: 600;
+    font-family: 'IBM Plex Mono', monospace;
+    line-height: 1;
+  }
+  .s-total .stat-value { color: var(--accent); }
+  .s-pending .stat-value { color: var(--yellow); }
+  .s-completed .stat-value { color: var(--green); }
+  .s-failed .stat-value { color: var(--red); }
+
+  /* TOOLBAR */
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+  .toolbar-left {
+    display: flex; align-items: center; gap: 12px;
+  }
+  .section-title {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    letter-spacing: 0.05em;
+  }
+  .count-badge {
+    background: var(--accent-glow);
+    border: 1px solid rgba(124,106,247,0.3);
+    color: var(--accent);
+    font-size: 11px;
+    font-family: 'IBM Plex Mono', monospace;
+    padding: 2px 8px;
+    border-radius: 4px;
+  }
+  .btn-group { display: flex; gap: 8px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: 'IBM Plex Sans', sans-serif;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: all 0.15s;
+  }
+  .btn-ghost {
+    background: transparent;
+    border-color: var(--border-hi);
+    color: var(--muted);
+  }
+  .btn-ghost:hover { border-color: var(--text); color: var(--text); }
+  .btn-green {
+    background: var(--green-bg);
+    border-color: rgba(34,211,160,0.3);
+    color: var(--green);
+  }
+  .btn-green:hover { background: rgba(34,211,160,0.15); }
+  .btn-red {
+    background: var(--red-bg);
+    border-color: rgba(240,90,90,0.3);
+    color: var(--red);
+  }
+  .btn-red:hover { background: rgba(240,90,90,0.15); }
+  .btn-icon { font-size: 14px; line-height: 1; }
+
+  /* TABLE */
+  .table-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  thead tr {
+    border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,0.02);
+  }
+  th {
+    padding: 11px 16px;
+    text-align: left;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 500;
+  }
+  tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background 0.1s;
+  }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: rgba(255,255,255,0.025); }
+  td { padding: 13px 16px; }
+
+  .id-cell {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .name-cell { font-weight: 500; }
+  .amount-cell {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+  }
+  .amount-gross { color: var(--muted); }
+  .amount-net { color: var(--green); font-weight: 500; }
+  .date-cell {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  /* BADGES */
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    font-family: 'IBM Plex Mono', monospace;
+    letter-spacing: 0.04em;
+  }
+  .badge::before { content: ''; width: 5px; height: 5px; border-radius: 50%; }
+  .badge-pending {
+    background: var(--yellow-bg);
+    color: var(--yellow);
+    border: 1px solid rgba(245,200,66,0.2);
+  }
+  .badge-pending::before { background: var(--yellow); }
+  .badge-completed {
+    background: var(--green-bg);
+    color: var(--green);
+    border: 1px solid rgba(34,211,160,0.2);
+  }
+  .badge-completed::before { background: var(--green); }
+  .badge-failed {
+    background: var(--red-bg);
+    color: var(--red);
+    border: 1px solid rgba(240,90,90,0.2);
+  }
+  .badge-failed::before { background: var(--red); }
+  .badge-requeue {
+    background: rgba(96,165,250,0.08);
+    color: var(--blue);
+    border: 1px solid rgba(96,165,250,0.2);
+  }
+  .badge-requeue::before { background: var(--blue); }
+
+  /* ROW ACTIONS */
+  .row-actions { display: flex; gap: 6px; }
+  .row-btn {
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-family: 'IBM Plex Mono', monospace;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: all 0.12s;
+    font-weight: 500;
+  }
+  .row-btn-ok {
+    background: var(--green-bg);
+    border-color: rgba(34,211,160,0.25);
+    color: var(--green);
+  }
+  .row-btn-ok:hover { background: rgba(34,211,160,0.18); }
+  .row-btn-del {
+    background: var(--red-bg);
+    border-color: rgba(240,90,90,0.25);
+    color: var(--red);
+  }
+  .row-btn-del:hover { background: rgba(240,90,90,0.18); }
+
+  /* EMPTY / LOADING */
+  .empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--muted);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+  }
+  .loading-state {
+    text-align: center;
+    padding: 40px;
+    color: var(--muted);
+  }
+  .spinner {
+    display: inline-block;
+    width: 18px; height: 18px;
+    border: 2px solid var(--border-hi);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+    margin-right: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* TOAST */
+  .toast {
+    position: fixed;
+    bottom: 24px; right: 24px;
+    padding: 12px 20px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 500;
+    pointer-events: none;
+    z-index: 9999;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: all 0.2s;
+  }
+  .toast.show {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  .toast-success {
+    background: var(--green-bg);
+    border: 1px solid rgba(34,211,160,0.3);
+    color: var(--green);
+  }
+  .toast-error {
+    background: var(--red-bg);
+    border: 1px solid rgba(240,90,90,0.3);
+    color: var(--red);
+  }
+
+  /* DB PATH NOTICE */
+  .db-notice {
+    display: flex; align-items: center; gap: 10px;
+    background: rgba(124,106,247,0.06);
+    border: 1px solid rgba(124,106,247,0.2);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 24px;
+    font-size: 12px;
+    font-family: 'IBM Plex Mono', monospace;
+    color: var(--muted);
+  }
+  .db-notice strong { color: var(--accent); }
+
+  @media (max-width: 900px) {
+    .stats-grid { grid-template-columns: repeat(2,1fr); }
+  }
+  @media (max-width: 600px) {
+    .stats-grid { grid-template-columns: 1fr 1fr; }
+    .topbar { flex-direction: column; gap: 12px; align-items: flex-start; }
+  }
+</style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>Donations Admin</h1>
-            <div class="time" id="time"></div>
-        </div>
-        
-        <div class="stats" id="statsContainer">
-            <div class="loading">Loading...</div>
-        </div>
-        
-        <div class="card">
-            <div class="card-header">
-                <div class="card-title">Donations</div>
-                <div class="controls">
-                    <button class="btn-default" id="refreshBtn">Refresh</button>
-                    <button class="btn-success" id="completedBtn">All completed</button>
-                    <button class="btn-danger" id="deleteBtn">Delete pending</button>
-                </div>
-            </div>
-            <div class="table-wrapper">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Donor</th>
-                            <th>Receiver</th>
-                            <th>Amount</th>
-                            <th>Net</th>
-                            <th>Status</th>
-                            <th>Date</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="tableBody">
-                        <tr><td colspan="8" class="loading">Loading...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
+<div class="wrap">
+
+  <!-- TOPBAR -->
+  <div class="topbar">
+    <div class="logo">
+      <div class="logo-dot"></div>
+      <div>
+        <div class="logo-title">POLYVOICE</div>
+        <div class="logo-sub">Donation Admin</div>
+      </div>
     </div>
-    
-    <div class="toast" id="toast"></div>
-    
-    <script>
-    var API = window.location.origin;
-    var PASSWORD = new URLSearchParams(window.location.search).get("password");
-    
-    function showToast(msg) {
-        var t = document.getElementById("toast");
-        t.textContent = msg;
-        t.className = "toast show success";
-        setTimeout(function() { t.classList.remove("show"); }, 3000);
+    <div class="topbar-right">
+      <div class="live-badge"><span class="live-dot"></span>LIVE</div>
+      <div class="clock" id="clock">--:--:--</div>
+    </div>
+  </div>
+
+  <!-- DB PATH NOTICE -->
+  <div class="db-notice" id="dbNotice">
+    <span>📂</span>
+    <span>Base de données : <strong id="dbPath">chargement...</strong></span>
+  </div>
+
+  <!-- STATS -->
+  <div class="stats-grid" id="statsGrid">
+    <div class="stat-card s-total"><div class="stat-label">Total</div><div class="stat-value" id="s-total">—</div></div>
+    <div class="stat-card s-pending"><div class="stat-label">En attente</div><div class="stat-value" id="s-pending">—</div></div>
+    <div class="stat-card s-completed"><div class="stat-label">Complétées</div><div class="stat-value" id="s-completed">—</div></div>
+    <div class="stat-card s-failed"><div class="stat-label">Échouées</div><div class="stat-value" id="s-failed">—</div></div>
+  </div>
+
+  <!-- TOOLBAR -->
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <span class="section-title">DONATIONS</span>
+      <span class="count-badge" id="countBadge">0</span>
+    </div>
+    <div class="btn-group">
+      <button class="btn btn-ghost" id="refreshBtn"><span class="btn-icon">↻</span> Refresh</button>
+      <button class="btn btn-green" id="completeAllBtn"><span class="btn-icon">✓</span> Tout compléter</button>
+      <button class="btn btn-red" id="deletePendingBtn"><span class="btn-icon">✕</span> Suppr. pending</button>
+    </div>
+  </div>
+
+  <!-- TABLE -->
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#ID</th>
+          <th>Donateur</th>
+          <th>Receveur</th>
+          <th>Brut</th>
+          <th>Net</th>
+          <th>Statut</th>
+          <th>Date</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="tableBody">
+        <tr><td colspan="8" class="loading-state"><span class="spinner"></span>Chargement...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<script>
+(function() {
+  var BASE = window.location.origin;
+  var PWD = (function() {
+    var search = window.location.search.substring(1);
+    var pairs = search.split('&');
+    for (var i = 0; i < pairs.length; i++) {
+      var kv = pairs[i].split('=');
+      if (kv[0] === 'password') return decodeURIComponent(kv[1] || '');
     }
-    
-    function updateTime() {
-        var now = new Date();
-        document.getElementById("time").textContent = now.toLocaleTimeString("fr-FR");
-    }
-    setInterval(updateTime, 1000);
-    updateTime();
-    
-    function loadStats() {
-        fetch(API + "/admin/stats?password=" + PASSWORD)
-            .then(function(r) { return r.json(); })
-            .then(function(d) {
-                var html = "";
-                html += "<div class='stat total'><div class='stat-label'>Total</div><div class='stat-value'>" + d.total + "</div></div>";
-                html += "<div class='stat pending'><div class='stat-label'>Pending</div><div class='stat-value'>" + d.pending + "</div></div>";
-                html += "<div class='stat completed'><div class='stat-label'>Completed</div><div class='stat-value'>" + d.completed + "</div></div>";
-                html += "<div class='stat failed'><div class='stat-label'>Failed</div><div class='stat-value'>" + d.failed + "</div></div>";
-                document.getElementById("statsContainer").innerHTML = html;
-            });
-    }
-    
-    function loadData() {
-        fetch(API + "/admin/donations?password=" + PASSWORD)
-            .then(function(r) { return r.json(); })
-            .then(function(d) {
-                var tbody = document.getElementById("tableBody");
-                if (!d.donations || d.donations.length === 0) {
-                    tbody.innerHTML = "<tr><td colspan='8' class='empty'>No donations</td></tr>";
-                    return;
-                }
-                var html = "";
-                for (var i = 0; i < d.donations.length; i++) {
-                    var x = d.donations[i];
-                    var date = new Date(x.created_at).toLocaleDateString("fr-FR");
-                    var donorName = x.donor_name || x.player_id;
-                    var receiverName = x.target_name || x.target_player_id;
-                    html += "<tr>";
-                    html += "<td>#" + x.id + "</td>";
-                    html += "<td>" + donorName + "</td>";
-                    html += "<td>" + receiverName + "</td>";
-                    html += "<td>" + x.amount_robux + "R$</td>";
-                    html += "<td>" + x.final_amount + "R$</td>";
-                    html += "<td><span class='badge badge-" + x.status + "'>" + x.status + "</span></td>";
-                    html += "<td>" + date + "</td>";
-                    html += "<td><div class='actions'>";
-                    html += "<button class='btn-success' data-id='" + x.id + "' onclick='setStatus(this)'>OK</button>";
-                    html += "<button class='btn-danger' data-id='" + x.id + "' onclick='delDonation(this)'>DEL</button>";
-                    html += "</div></td>";
-                    html += "</tr>";
-                }
-                tbody.innerHTML = html;
-            });
-    }
-    
-    function setStatus(btn) {
-        var id = btn.getAttribute("data-id");
-        var url = API + "/admin/donations/" + id + "/status?password=" + PASSWORD;
-        fetch(url, {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: "{\"status\":\"completed\"}"
-        }).then(function() {
-            showToast("Updated");
-            loadData();
-            loadStats();
-        });
-    }
-    
-    function delDonation(btn) {
-        var id = btn.getAttribute("data-id");
-        if (!confirm("Delete " + id + "?")) return;
-        var url = API + "/admin/donations/" + id + "?password=" + PASSWORD;
-        fetch(url, {method: "DELETE"})
-            .then(function() {
-                showToast("Deleted");
-                loadData();
-                loadStats();
-            });
-    }
-    
-    function deleteAllPending() {
-        if (!confirm("Delete ALL pending?")) return;
-        var url = API + "/admin/cleanup?password=" + PASSWORD;
-        fetch(url, {method: "POST"})
-            .then(function(r) { return r.json(); })
-            .then(function(d) {
-                showToast(d.deleted + " deleted");
-                loadData();
-                loadStats();
-            });
-    }
-    
-    function markAllCompleted() {
-        if (!confirm("Mark ALL as completed?")) return;
-        var url = API + "/admin/mark-completed?password=" + PASSWORD;
-        fetch(url, {method: "POST"})
-            .then(function(r) { return r.json(); })
-            .then(function(d) {
-                showToast(d.updated + " marked");
-                loadData();
-                loadStats();
-            });
-    }
-    
-    document.getElementById("refreshBtn").onclick = loadData;
-    document.getElementById("completedBtn").onclick = markAllCompleted;
-    document.getElementById("deleteBtn").onclick = deleteAllPending;
-    
-    loadStats();
-    loadData();
-    setInterval(function() { loadStats(); loadData(); }, 20000);
-    </script>
+    return '';
+  })();
+
+  /* ---- CLOCK ---- */
+  function tickClock() {
+    var now = new Date();
+    var h = now.getHours().toString().padStart(2,'0');
+    var m = now.getMinutes().toString().padStart(2,'0');
+    var s = now.getSeconds().toString().padStart(2,'0');
+    document.getElementById('clock').textContent = h + ':' + m + ':' + s;
+  }
+  setInterval(tickClock, 1000);
+  tickClock();
+
+  /* ---- TOAST ---- */
+  var toastTimer = null;
+  function showToast(msg, isError) {
+    var el = document.getElementById('toast');
+    el.textContent = msg;
+    el.className = 'toast show ' + (isError ? 'toast-error' : 'toast-success');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function() { el.className = 'toast'; }, 3000);
+  }
+
+  /* ---- BADGE CLASS ---- */
+  function badgeClass(st) {
+    if (st === 'pending') return 'badge-pending';
+    if (st === 'completed') return 'badge-completed';
+    if (st === 'failed') return 'badge-failed';
+    if (st === 'requeue') return 'badge-requeue';
+    return 'badge-pending';
+  }
+
+  /* ---- LOAD STATS ---- */
+  function loadStats() {
+    fetch(BASE + '/admin/stats?password=' + PWD)
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        document.getElementById('s-total').textContent    = d.total     !== undefined ? d.total     : '?';
+        document.getElementById('s-pending').textContent  = d.pending   !== undefined ? d.pending   : '?';
+        document.getElementById('s-completed').textContent= d.completed !== undefined ? d.completed : '?';
+        document.getElementById('s-failed').textContent   = d.failed    !== undefined ? d.failed    : '?';
+        if (d.db_path) {
+          document.getElementById('dbPath').textContent = d.db_path;
+        }
+      })
+      .catch(function(e) { console.error('Stats error:', e); });
+  }
+
+  /* ---- FORMAT DATE ---- */
+  function fmtDate(str) {
+    if (!str) return '—';
+    var d = new Date(str);
+    if (isNaN(d.getTime())) return str;
+    var day = d.getDate().toString().padStart(2,'0');
+    var mo  = (d.getMonth()+1).toString().padStart(2,'0');
+    var yr  = d.getFullYear();
+    var hr  = d.getHours().toString().padStart(2,'0');
+    var min = d.getMinutes().toString().padStart(2,'0');
+    return day+'/'+mo+'/'+yr+' '+hr+':'+min;
+  }
+
+  /* ---- LOAD TABLE ---- */
+  function loadTable() {
+    fetch(BASE + '/admin/donations?password=' + PWD)
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        var tbody = document.getElementById('tableBody');
+        var list = d.donations;
+        document.getElementById('countBadge').textContent = list ? list.length : 0;
+        if (!list || list.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="8" class="empty-state">/ / Aucune donation trouvée / /</td></tr>';
+          return;
+        }
+        var rows = '';
+        for (var i = 0; i < list.length; i++) {
+          var item = list[i];
+          var donorDisplay    = item.donor_name  ? item.donor_name  : String(item.player_id);
+          var receiverDisplay = item.target_name ? item.target_name : String(item.target_player_id);
+          var itemStatus      = item.status || 'pending';
+          var itemId          = item.id;
+          rows += '<tr>';
+          rows += '<td class="id-cell">#' + itemId + '</td>';
+          rows += '<td class="name-cell">' + donorDisplay + '</td>';
+          rows += '<td class="name-cell">' + receiverDisplay + '</td>';
+          rows += '<td class="amount-cell amount-gross">' + item.amount_robux + ' R$</td>';
+          rows += '<td class="amount-cell amount-net">' + item.final_amount + ' R$</td>';
+          rows += '<td><span class="badge ' + badgeClass(itemStatus) + '">' + itemStatus + '</span></td>';
+          rows += '<td class="date-cell">' + fmtDate(item.created_at) + '</td>';
+          rows += '<td><div class="row-actions">';
+          rows += '<button class="row-btn row-btn-ok" data-id="' + itemId + '" onclick="markOK(this)">✓ OK</button>';
+          rows += '<button class="row-btn row-btn-del" data-id="' + itemId + '" onclick="delRow(this)">✕ DEL</button>';
+          rows += '</div></td>';
+          rows += '</tr>';
+        }
+        tbody.innerHTML = rows;
+      })
+      .catch(function(e) {
+        console.error('Table error:', e);
+        document.getElementById('tableBody').innerHTML =
+          '<tr><td colspan="8" class="empty-state">Erreur de chargement</td></tr>';
+      });
+  }
+
+  /* ---- ROW ACTIONS (global scope for onclick) ---- */
+  window.markOK = function(btn) {
+    var id = btn.getAttribute('data-id');
+    fetch(BASE + '/admin/donations/' + id + '/status?password=' + PWD, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: '{"status":"completed"}'
+    })
+    .then(function(r) { return r.json(); })
+    .then(function() { showToast('Donation #' + id + ' complétée'); loadTable(); loadStats(); })
+    .catch(function() { showToast('Erreur', true); });
+  };
+
+  window.delRow = function(btn) {
+    var id = btn.getAttribute('data-id');
+    if (!confirm('Supprimer la donation #' + id + ' ?')) return;
+    fetch(BASE + '/admin/donations/' + id + '?password=' + PWD, { method: 'DELETE' })
+    .then(function(r) { return r.json(); })
+    .then(function() { showToast('Donation #' + id + ' supprimée'); loadTable(); loadStats(); })
+    .catch(function() { showToast('Erreur', true); });
+  };
+
+  /* ---- TOOLBAR BUTTONS ---- */
+  document.getElementById('refreshBtn').onclick = function() {
+    loadStats(); loadTable(); showToast('Données rechargées');
+  };
+
+  document.getElementById('completeAllBtn').onclick = function() {
+    if (!confirm('Marquer TOUTES les donations pending comme completed ?')) return;
+    fetch(BASE + '/admin/mark-completed?password=' + PWD, { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) { showToast(d.updated + ' donation(s) complétée(s)'); loadTable(); loadStats(); })
+    .catch(function() { showToast('Erreur', true); });
+  };
+
+  document.getElementById('deletePendingBtn').onclick = function() {
+    if (!confirm('Supprimer TOUTES les donations pending ?')) return;
+    fetch(BASE + '/admin/cleanup?password=' + PWD, { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) { showToast(d.deleted + ' donation(s) supprimée(s)'); loadTable(); loadStats(); })
+    .catch(function() { showToast('Erreur', true); });
+  };
+
+  /* ---- INIT ---- */
+  loadStats();
+  loadTable();
+  setInterval(function() { loadStats(); loadTable(); }, 20000);
+
+})();
+</script>
 </body>
 </html>"""
     return html
- 
+
+
 @app.route('/admin/stats', methods=['GET'])
 def admin_stats():
-    """Récupère les stats de donations"""
     password = request.args.get('password', '')
     if password != ADMIN_PASSWORD:
         return jsonify({"error": "Unauthorized"}), 401
-    
+
     try:
         conn = get_db()
         c = conn.cursor()
-        
         c.execute("SELECT COUNT(*) FROM donations")
         total = c.fetchone()[0]
-        
         c.execute("SELECT COUNT(*) FROM donations WHERE status = 'pending'")
         pending = c.fetchone()[0]
-        
         c.execute("SELECT COUNT(*) FROM donations WHERE status = 'completed'")
         completed = c.fetchone()[0]
-        
         c.execute("SELECT COUNT(*) FROM donations WHERE status = 'failed'")
         failed = c.fetchone()[0]
-        
         conn.close()
-        
         return jsonify({
-            "total": total,
-            "pending": pending,
-            "completed": completed,
-            "failed": failed
+            "total": total, "pending": pending,
+            "completed": completed, "failed": failed,
+            "db_path": DATABASE_PATH  # ✅ surface the DB path in the dashboard
         }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
- 
- 
+
+
 @app.route('/admin/donations', methods=['GET'])
 def admin_list_donations():
-    """Liste toutes les donations avec infos du donateur"""
     password = request.args.get('password', '')
     if password != ADMIN_PASSWORD:
         return jsonify({"error": "Unauthorized"}), 401
-    
+
     try:
         conn = get_db()
         c = conn.cursor()
-        
         c.execute('''
-            SELECT id, player_id, target_player_id, amount_robux, final_amount, status, created_at 
-            FROM donations 
-            ORDER BY created_at DESC
+            SELECT id, player_id, target_player_id, amount_robux, final_amount, status, created_at
+            FROM donations ORDER BY created_at DESC
         ''')
-        
+        rows = c.fetchall()
+        conn.close()
+
         donations = []
-        for row in c.fetchall():
-            donor_info = get_user_info(row[1])
+        for row in rows:
+            donor_info  = get_user_info(row[1])
             target_info = get_user_info(row[2])
-            
             donations.append({
                 "id": row[0],
                 "player_id": row[1],
-                "donor_name": donor_info.get("name") if donor_info else None,
+                "donor_name":  donor_info.get("name")  if donor_info  else None,
                 "target_player_id": row[2],
                 "target_name": target_info.get("name") if target_info else None,
                 "amount_robux": row[3],
@@ -820,106 +1242,84 @@ def admin_list_donations():
                 "status": row[5],
                 "created_at": row[6]
             })
-        
-        conn.close()
-        
         return jsonify({"donations": donations}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
- 
- 
+
+
 @app.route('/admin/donations/<int:donation_id>/status', methods=['POST'])
 def admin_update_status(donation_id):
-    """Met à jour le statut d'une donation"""
     password = request.args.get('password', '')
     if password != ADMIN_PASSWORD:
         return jsonify({"error": "Unauthorized"}), 401
-    
+
     try:
         data = request.get_json()
         new_status = data.get("status")
-        
         if new_status not in ("pending", "completed", "failed"):
             return jsonify({"error": "Invalid status"}), 400
-        
         conn = get_db()
         c = conn.cursor()
         c.execute('UPDATE donations SET status = ? WHERE id = ?', (new_status, donation_id))
         conn.commit()
         conn.close()
-        
-        logger.info(f"✅ Donation {donation_id} → {new_status}")
         return jsonify({"success": True}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
- 
- 
+
+
 @app.route('/admin/donations/<int:donation_id>', methods=['DELETE'])
 def admin_delete_donation(donation_id):
-    """Supprime une donation"""
     password = request.args.get('password', '')
     if password != ADMIN_PASSWORD:
         return jsonify({"error": "Unauthorized"}), 401
-    
+
     try:
         conn = get_db()
         c = conn.cursor()
         c.execute('DELETE FROM donations WHERE id = ?', (donation_id,))
         conn.commit()
         conn.close()
-        
-        logger.info(f"🗑️ Donation {donation_id} supprimée")
         return jsonify({"success": True}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
- 
- 
+
+
 @app.route('/admin/cleanup', methods=['POST'])
 def admin_cleanup_pending():
-    """Supprime toutes les donations pending"""
     password = request.args.get('password', '')
     if password != ADMIN_PASSWORD:
         return jsonify({"error": "Unauthorized"}), 401
-    
+
     try:
         conn = get_db()
         c = conn.cursor()
-        
         c.execute("SELECT COUNT(*) FROM donations WHERE status = 'pending'")
-        deleted_count = c.fetchone()[0]
-        
+        cnt = c.fetchone()[0]
         c.execute("DELETE FROM donations WHERE status = 'pending'")
         conn.commit()
         conn.close()
-        
-        logger.info(f"🧹 {deleted_count} donations pending supprimées")
-        return jsonify({"success": True, "deleted": deleted_count}), 200
+        return jsonify({"success": True, "deleted": cnt}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
- 
- 
+
+
 @app.route('/admin/mark-completed', methods=['POST'])
 def admin_mark_completed():
-    """Marque tous les pending en completed"""
     password = request.args.get('password', '')
     if password != ADMIN_PASSWORD:
         return jsonify({"error": "Unauthorized"}), 401
-    
+
     try:
         conn = get_db()
         c = conn.cursor()
-        
         c.execute("UPDATE donations SET status = 'completed' WHERE status = 'pending'")
         conn.commit()
-        
         updated = c.rowcount
         conn.close()
-        
-        logger.info(f"✅ {updated} donations marquées completed")
         return jsonify({"success": True, "updated": updated}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
- 
 
 
 # ============================================================================
@@ -928,8 +1328,9 @@ def admin_mark_completed():
 
 init_db()
 logger.info("✅ API Donation en cours de démarrage...")
+logger.info(f"🗄️ Database path: {DATABASE_PATH}")
 logger.info(f"🔧 DevProducts configurés: {list(DEVPRODUCT_AMOUNTS.keys())}")
-logger.info(f"🔔 Discord webhook: {'configuré' if DISCORD_WEBHOOK_URL else 'NON configuré — ajoute DISCORD_WEBHOOK_URL dans les env vars Render'}")
+logger.info(f"🔔 Discord webhook: {'configuré' if DISCORD_WEBHOOK_URL else 'NON configuré'}")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False, use_reloader=False)
