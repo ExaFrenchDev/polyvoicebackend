@@ -8,7 +8,7 @@ import asyncio
 import aiohttp
 from dotenv import load_dotenv
 import discord
-from discord.ext import tasks
+from discord.ext import commands, tasks
 import logging
 import requests
 import json
@@ -22,17 +22,20 @@ app = Flask(__name__)
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
 ROBLOX_GAME_ID = int(os.getenv("ROBLOX_GAME_ID"))
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")  # Pour vérifier les appels webhook
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 GROUP_ID = int(os.getenv("GROUP_ID"))
-ACCOUNT_COOKIE = os.getenv("ROBLOX_ACCOUNT_COOKIE")  # Cookie du compte pour transférer les Robux
+ACCOUNT_COOKIE = os.getenv("ROBLOX_ACCOUNT_COOKIE")
 DATABASE_PATH = "donations.db"
+
+# Admin Discord IDs (à configurer dans .env)
+ADMIN_DISCORD_IDS = list(map(int, os.getenv("ADMIN_DISCORD_IDS", "").split(","))) if os.getenv("ADMIN_DISCORD_IDS") else []
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# DevProduct IDs mapping (à configurer)
+# DevProduct IDs mapping
 DEVPRODUCT_AMOUNTS = {
-    "123456": 5,      # DevProduct ID: 123456 = 5 Robux donation
+    "123456": 5,
     "123457": 10,
     "123458": 50,
     "123459": 100,
@@ -42,9 +45,9 @@ DEVPRODUCT_AMOUNTS = {
     "123463": 10000,
 }
 
-TAX_RATE = 0.40  # 40% taxes Roblox
-WAIT_DAYS = 7  # Délai avant transfert
-MIN_GROUP_TENURE_DAYS = 7  # Durée minimale dans le groupe
+TAX_RATE = 0.40
+WAIT_DAYS = 7
+MIN_GROUP_TENURE_DAYS = 7
 
 
 # ============================================================================
@@ -92,6 +95,23 @@ def get_db():
 
 
 # ============================================================================
+# PERMISSION HELPERS
+# ============================================================================
+
+def is_admin(user_id):
+    """Vérifier si un utilisateur Discord est admin"""
+    return user_id in ADMIN_DISCORD_IDS
+
+
+async def admin_only(ctx):
+    """Decorator pour vérifier les permissions admin"""
+    if not is_admin(ctx.author.id):
+        await ctx.send("❌ Vous n'avez pas les permissions pour cette commande.")
+        return False
+    return True
+
+
+# ============================================================================
 # ROBLOX API FUNCTIONS
 # ============================================================================
 
@@ -126,7 +146,7 @@ def get_group_membership(user_id, group_id):
                 if group["group"]["id"] == group_id:
                     return {
                         "in_group": True,
-                        "join_date": group.get("joinedDate"),  # ISO format
+                        "join_date": group.get("joinedDate"),
                         "role": group.get("role", {}).get("name")
                     }
             return {"in_group": False}
@@ -142,7 +162,6 @@ def check_eligibility(user_id, group_id, days_required=MIN_GROUP_TENURE_DAYS):
     if not membership.get("in_group"):
         return {"eligible": False, "reason": "Not in group"}
     
-    # Vérifier la durée dans le groupe
     if membership.get("join_date"):
         join_date = datetime.fromisoformat(membership["join_date"].replace("Z", "+00:00"))
         days_in_group = (datetime.now(join_date.tzinfo) - join_date).days
@@ -157,26 +176,21 @@ def check_eligibility(user_id, group_id, days_required=MIN_GROUP_TENURE_DAYS):
 
 
 def transfer_robux(target_user_id, amount_robux):
-    """Transférer les Robux au joueur via le compte bot (via le cookie)"""
+    """Transférer les Robux au joueur via le compte bot"""
     try:
-        # Setup session avec le cookie du compte bot
         session = requests.Session()
         session.cookies.set('.ROBLOSECURITY', ACCOUNT_COOKIE)
         
-        # Headers nécessaires
         headers = {
             'X-CSRF-TOKEN': '',
             'Content-Type': 'application/json',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
         }
         
-        # Étape 1: Récupérer le X-CSRF-TOKEN
         csrf_response = session.post('https://www.roblox.com/home', headers=headers)
         if 'X-CSRF-TOKEN' in csrf_response.headers:
             headers['X-CSRF-TOKEN'] = csrf_response.headers['X-CSRF-TOKEN']
         
-        # Étape 2: Transférer les Robux via l'endpoint de transfert
-        # (Endpoint privé Roblox - utilise l'API de transfer Robux)
         transfer_payload = {
             'recipientId': target_user_id,
             'robux': amount_robux,
@@ -208,21 +222,26 @@ def transfer_robux(target_user_id, amount_robux):
 
 
 # ============================================================================
-# DISCORD BOT
+# DISCORD BOT WITH COMMANDS
 # ============================================================================
 
-class DonationBot(discord.Client):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+class DonationCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
         self.channel_id = DISCORD_CHANNEL_ID
-    
-    async def on_ready(self):
-        logger.info(f"Discord bot connecté: {self.user}")
         self.check_donations.start()
+    
+    @commands.Cog.listener()
+    async def on_ready(self):
+        logger.info(f"Discord bot connecté: {self.bot.user}")
     
     async def send_donation_notification(self, player_name, target_name, amount, final_amount, taxes):
         """Envoyer une notification Discord pour une nouvelle donation"""
-        channel = self.get_channel(DISCORD_CHANNEL_ID)
+        channel = self.bot.get_channel(DISCORD_CHANNEL_ID)
         if not channel:
             logger.error("Canal Discord non trouvé")
             return
@@ -241,15 +260,14 @@ class DonationBot(discord.Client):
         
         await channel.send(embed=embed)
     
-    @tasks.loop(minutes=30)  # Checker toutes les 30 minutes
+    @tasks.loop(minutes=30)
     async def check_donations(self):
-        """Vérifier les donations en attente et traiter les transfers"""
+        """Vérifier les donations en attente"""
         logger.info("Vérification des donations en attente...")
         
         conn = get_db()
         c = conn.cursor()
         
-        # Récupérer les donations qui ont attendu 5-7 jours
         cutoff_date = datetime.now() - timedelta(days=WAIT_DAYS)
         
         c.execute('''
@@ -264,11 +282,9 @@ class DonationBot(discord.Client):
             user_id = donation['target_player_id']
             amount = donation['final_amount']
             
-            # Vérifier l'éligibilité
             eligibility = check_eligibility(user_id, GROUP_ID)
             
             if eligibility["eligible"]:
-                # Transférer les Robux
                 success = transfer_robux(user_id, amount)
                 
                 if success:
@@ -280,21 +296,18 @@ class DonationBot(discord.Client):
                     
                     logger.info(f"Transfert réussi pour donation {donation['id']}")
                     
-                    # Notifier le joueur sur Discord si besoin
-                    channel = self.get_channel(DISCORD_CHANNEL_ID)
+                    channel = self.bot.get_channel(DISCORD_CHANNEL_ID)
                     if channel:
                         await channel.send(
                             f"✅ Transfert complété pour {user_id}: {amount} Robux"
                         )
                 else:
-                    # Réessayer plus tard
                     c.execute('''
                         UPDATE donations 
                         SET retry_count = retry_count + 1, last_retry = CURRENT_TIMESTAMP
                         WHERE id = ?
                     ''', (donation['id'],))
             else:
-                # Rejeter et re-queue
                 c.execute('''
                     UPDATE donations 
                     SET status = 'requeue', retry_count = retry_count + 1, last_retry = CURRENT_TIMESTAMP
@@ -305,12 +318,191 @@ class DonationBot(discord.Client):
         
         conn.commit()
         conn.close()
+    
+    # ========================================================================
+    # COMMANDES ADMIN
+    # ========================================================================
+    
+    @commands.command(name="donations_stats")
+    async def donations_stats(self, ctx):
+        """Afficher les statistiques de donations (ADMIN)"""
+        if not await admin_only(ctx):
+            return
+        
+        conn = get_db()
+        c = conn.cursor()
+        
+        c.execute('SELECT COUNT(*) as total FROM donations')
+        total = c.fetchone()['total']
+        
+        c.execute('SELECT COUNT(*) as pending FROM donations WHERE status = "pending"')
+        pending = c.fetchone()['pending']
+        
+        c.execute('SELECT COUNT(*) as completed FROM donations WHERE status = "completed"')
+        completed = c.fetchone()['completed']
+        
+        c.execute('SELECT SUM(amount_robux) as total_robux FROM donations')
+        total_robux = c.fetchone()['total_robux'] or 0
+        
+        c.execute('SELECT SUM(final_amount) as final_robux FROM donations WHERE status = "completed"')
+        final_robux = c.fetchone()['final_robux'] or 0
+        
+        conn.close()
+        
+        embed = discord.Embed(
+            title="📊 Statistiques Donations",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        embed.add_field(name="Total donations", value=f"```{total}```", inline=True)
+        embed.add_field(name="En attente", value=f"```{pending}```", inline=True)
+        embed.add_field(name="Complétées", value=f"```{completed}```", inline=True)
+        embed.add_field(name="Robux total reçus", value=f"```{total_robux}```", inline=False)
+        embed.add_field(name="Robux transférés (net)", value=f"```{final_robux}```", inline=False)
+        embed.set_footer(text="Données en direct")
+        
+        await ctx.send(embed=embed)
+    
+    @commands.command(name="donation_status")
+    async def donation_status(self, ctx, donation_id: int):
+        """Voir le statut d'une donation (ADMIN)"""
+        if not await admin_only(ctx):
+            return
+        
+        conn = get_db()
+        c = conn.cursor()
+        
+        c.execute('SELECT * FROM donations WHERE id = ?', (donation_id,))
+        donation = c.fetchone()
+        conn.close()
+        
+        if not donation:
+            await ctx.send("❌ Donation non trouvée")
+            return
+        
+        player_info = get_user_info(donation['player_id'])
+        target_info = get_user_info(donation['target_player_id'])
+        
+        embed = discord.Embed(
+            title=f"📋 Donation #{donation_id}",
+            color=discord.Color.green() if donation['status'] == 'completed' else discord.Color.orange(),
+            timestamp=datetime.now()
+        )
+        embed.add_field(
+            name="Donateur",
+            value=f"```{player_info.get('name', 'N/A') if player_info else 'N/A'} (ID: {donation['player_id']})```",
+            inline=False
+        )
+        embed.add_field(
+            name="Receveur",
+            value=f"```{target_info.get('name', 'N/A') if target_info else 'N/A'} (ID: {donation['target_player_id']})```",
+            inline=False
+        )
+        embed.add_field(name="Montant brut", value=f"```{donation['amount_robux']} Robux```", inline=True)
+        embed.add_field(name="Montant net", value=f"```{donation['final_amount']} Robux```", inline=True)
+        embed.add_field(name="Statut", value=f"```{donation['status']}```", inline=True)
+        embed.add_field(name="Créée le", value=f"```{donation['created_at']}```", inline=False)
+        if donation['processed_at']:
+            embed.add_field(name="Traitée le", value=f"```{donation['processed_at']}```", inline=False)
+        embed.add_field(name="Tentatives", value=f"```{donation['retry_count']}/5```", inline=True)
+        
+        await ctx.send(embed=embed)
+    
+    @commands.command(name="pending_donations")
+    async def pending_donations(self, ctx, limit: int = 5):
+        """Lister les donations en attente (ADMIN)"""
+        if not await admin_only(ctx):
+            return
+        
+        conn = get_db()
+        c = conn.cursor()
+        
+        c.execute('''
+            SELECT * FROM donations 
+            WHERE status = 'pending' 
+            ORDER BY created_at DESC 
+            LIMIT ?
+        ''', (limit,))
+        
+        donations = c.fetchall()
+        conn.close()
+        
+        if not donations:
+            await ctx.send("✅ Aucune donation en attente")
+            return
+        
+        embed = discord.Embed(
+            title=f"⏳ Donations en attente ({len(donations)})",
+            color=discord.Color.orange(),
+            timestamp=datetime.now()
+        )
+        
+        for donation in donations:
+            days_left = (datetime.fromisoformat(donation['created_at']) + timedelta(days=WAIT_DAYS) - datetime.now()).days
+            embed.add_field(
+                name=f"ID #{donation['id']} → Joueur {donation['target_player_id']}",
+                value=f"```{donation['final_amount']} Robux | Prêt dans {max(0, days_left)} jours```",
+                inline=False
+            )
+        
+        await ctx.send(embed=embed)
+    
+    @commands.command(name="user_donations")
+    async def user_donations(self, ctx, roblox_user_id: int):
+        """Voir toutes les donations d'un utilisateur (ADMIN)"""
+        if not await admin_only(ctx):
+            return
+        
+        conn = get_db()
+        c = conn.cursor()
+        
+        c.execute('''
+            SELECT * FROM donations 
+            WHERE target_player_id = ? 
+            ORDER BY created_at DESC
+        ''', (roblox_user_id,))
+        
+        donations = c.fetchall()
+        conn.close()
+        
+        if not donations:
+            await ctx.send(f"❌ Aucune donation pour l'utilisateur {roblox_user_id}")
+            return
+        
+        user_info = get_user_info(roblox_user_id)
+        user_name = user_info.get('name', 'N/A') if user_info else 'N/A'
+        
+        embed = discord.Embed(
+            title=f"💝 Donations de {user_name}",
+            color=discord.Color.purple(),
+            timestamp=datetime.now()
+        )
+        
+        total_robux = 0
+        for donation in donations:
+            total_robux += donation['final_amount'] or 0
+            embed.add_field(
+                name=f"ID #{donation['id']} - {donation['status']}",
+                value=f"```{donation['final_amount']} Robux | {donation['created_at'][:10]}```",
+                inline=False
+            )
+        
+        embed.set_footer(text=f"Total: {total_robux} Robux")
+        await ctx.send(embed=embed)
+    
+    @commands.command(name="force_check")
+    async def force_check(self, ctx):
+        """Forcer la vérification immédiate des donations (ADMIN)"""
+        if not await admin_only(ctx):
+            return
+        
+        await ctx.send("⚙️ Vérification forcée en cours...")
+        await self.check_donations()
+        await ctx.send("✅ Vérification terminée")
 
-
-# Initialiser le bot Discord
-intents = discord.Intents.default()
-bot = DonationBot(intents=intents)
-
+# Ajouter le Cog au bot
+async def setup_bot():
+    await bot.add_cog(DonationCog(bot))
 
 # ============================================================================
 # FLASK ROUTES
@@ -318,18 +510,8 @@ bot = DonationBot(intents=intents)
 
 @app.route('/webhook/devproduct', methods=['POST'])
 def handle_devproduct_purchase():
-    """
-    Webhook Roblox quand un joueur achète un DevProduct
-    Payload attendu:
-    {
-        "userId": 12345,
-        "targetUserId": 54321,
-        "devProductId": "123456",
-        "transactionId": "xxx"
-    }
-    """
+    """Webhook Roblox pour les achats DevProduct"""
     
-    # Vérifier la signature du webhook (optionnel mais recommandé)
     signature = request.headers.get('X-Roblox-Signature')
     if signature and not verify_webhook_signature(request.data, signature):
         logger.warning("Signature webhook invalide")
@@ -352,7 +534,6 @@ def handle_devproduct_purchase():
     final_amount = int(amount * (1 - TAX_RATE))
     taxes = amount - final_amount
     
-    # Stocker dans la DB
     conn = get_db()
     c = conn.cursor()
     
@@ -366,18 +547,18 @@ def handle_devproduct_purchase():
     donation_id = c.lastrowid
     conn.close()
     
-    # Récupérer les noms des joueurs pour la notification Discord
     player_info = get_user_info(user_id)
     target_info = get_user_info(target_user_id)
     
     player_name = player_info.get("name", f"User {user_id}") if player_info else f"User {user_id}"
     target_name = target_info.get("name", f"User {target_user_id}") if target_info else f"User {target_user_id}"
     
-    # Envoyer la notification Discord
-    asyncio.run_coroutine_threadsafe(
-        bot.send_donation_notification(player_name, target_name, amount, final_amount, taxes),
-        bot.loop
-    )
+    cog = bot.get_cog("DonationCog")
+    if cog:
+        asyncio.run_coroutine_threadsafe(
+            cog.send_donation_notification(player_name, target_name, amount, final_amount, taxes),
+            bot.loop
+        )
     
     logger.info(f"Donation {donation_id} reçue: {player_name} -> {target_name} ({amount} Robux, {final_amount} après taxes)")
     
@@ -442,16 +623,18 @@ def index():
 if __name__ == '__main__':
     init_db()
     
-    # Démarrer le bot Discord dans un thread séparé
     import threading
     
+    async def bot_startup():
+        await setup_bot()
+        await bot.start(DISCORD_TOKEN)
+    
     def run_bot():
-        bot.run(DISCORD_TOKEN)
+        asyncio.run(bot_startup())
     
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     
-    # Démarrer le serveur Flask
     app.run(
         host='0.0.0.0',
         port=int(os.getenv('PORT', 5000)),
