@@ -31,7 +31,7 @@ DEVPRODUCT_AMOUNTS = {
     "3593525652": 100,
 }
 
-TAX_RATE = 0.40
+TAX_RATE = 0.60
 WAIT_DAYS = 7
 MIN_GROUP_TENURE_DAYS = 7
 
@@ -527,10 +527,10 @@ def index():
 
 @app.route('/admin', methods=['GET'])
 def dashboard():
-    """Dashboard HTML pro et modern"""
+    """Dashboard clean et modern avec design neutre"""
     password = request.args.get('password', '')
     if password != ADMIN_PASSWORD:
-        return "❌ Accès refusé", 403
+        return "Accès refusé", 403
     
     html = """<!DOCTYPE html>
 <html lang="fr">
@@ -538,202 +538,157 @@ def dashboard():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin Donations</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
-            background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
-            min-height: 100vh;
-            color: #333;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #f5f5f5;
+            color: #1f2937;
+            line-height: 1.6;
         }
         
         .container {
-            max-width: 1400px;
+            max-width: 1200px;
             margin: 0 auto;
-            padding: 30px 20px;
+            padding: 20px;
         }
         
         .header {
+            background: white;
+            padding: 24px;
+            border-radius: 8px;
+            margin-bottom: 24px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 40px;
-            color: white;
         }
         
         .header h1 {
-            font-size: 32px;
-            font-weight: 700;
-            letter-spacing: -0.5px;
-        }
-        
-        .header-right {
-            display: flex;
-            gap: 15px;
-            align-items: center;
+            font-size: 24px;
+            font-weight: 600;
         }
         
         .time {
-            font-size: 13px;
-            opacity: 0.8;
-            background: rgba(255,255,255,0.1);
-            padding: 8px 16px;
-            border-radius: 20px;
-            backdrop-filter: blur(10px);
+            font-size: 14px;
+            color: #6b7280;
+            font-weight: 500;
         }
         
-        .stats-grid {
+        .stats {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 20px;
-            margin-bottom: 40px;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
         }
         
-        .stat-card {
+        .stat {
             background: white;
-            border-radius: 16px;
-            padding: 24px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            border: 1px solid rgba(0,0,0,0.05);
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            border-left: 4px solid #e5e7eb;
         }
         
-        .stat-card:hover {
-            transform: translateY(-4px);
-            box-shadow: 0 12px 40px rgba(0,0,0,0.15);
-        }
+        .stat.total { border-left-color: #6b7280; }
+        .stat.pending { border-left-color: #f59e0b; }
+        .stat.completed { border-left-color: #10b981; }
+        .stat.failed { border-left-color: #ef4444; }
         
         .stat-label {
             font-size: 12px;
-            font-weight: 600;
-            color: #666;
+            color: #6b7280;
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            margin-bottom: 12px;
-        }
-        
-        .stat-number {
-            font-size: 36px;
-            font-weight: 700;
-            color: #111;
             margin-bottom: 8px;
+            font-weight: 600;
         }
         
-        .stat-change {
-            font-size: 12px;
-            color: #999;
-        }
-        
-        .stat-card.primary .stat-number { color: #6366f1; }
-        .stat-card.success .stat-number { color: #10b981; }
-        .stat-card.warning .stat-number { color: #f59e0b; }
-        .stat-card.danger .stat-number { color: #ef4444; }
-        
-        .content {
-            display: grid;
-            grid-template-columns: 1fr;
-            gap: 20px;
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+            color: #1f2937;
         }
         
         .card {
             background: white;
-            border-radius: 16px;
-            padding: 28px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-            border: 1px solid rgba(0,0,0,0.05);
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            overflow: hidden;
         }
         
         .card-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid #e5e7eb;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 24px;
-            padding-bottom: 16px;
-            border-bottom: 2px solid #f3f4f6;
+            flex-wrap: wrap;
+            gap: 16px;
         }
         
         .card-title {
-            font-size: 18px;
-            font-weight: 700;
-            color: #111;
+            font-size: 16px;
+            font-weight: 600;
         }
         
         .controls {
             display: flex;
-            gap: 12px;
+            gap: 8px;
             flex-wrap: wrap;
         }
         
         button {
-            padding: 10px 20px;
+            padding: 8px 16px;
             border: none;
-            border-radius: 10px;
-            cursor: pointer;
+            border-radius: 6px;
             font-size: 13px;
-            font-weight: 600;
+            font-weight: 500;
+            cursor: pointer;
             transition: all 0.2s ease;
-            display: flex;
-            align-items: center;
-            gap: 8px;
+            white-space: nowrap;
         }
         
-        .btn {
+        .btn-default {
             background: #f3f4f6;
-            color: #333;
+            color: #1f2937;
             border: 1px solid #e5e7eb;
         }
         
-        .btn:hover {
+        .btn-default:hover {
             background: #e5e7eb;
         }
         
         .btn-primary {
-            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            background: #4b5563;
             color: white;
-            border: none;
         }
         
         .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 20px rgba(99, 102, 241, 0.35);
+            background: #3f4554;
         }
         
         .btn-success {
             background: #10b981;
             color: white;
-            border: none;
         }
         
         .btn-success:hover {
             background: #059669;
-            transform: translateY(-2px);
         }
         
         .btn-danger {
             background: #ef4444;
             color: white;
-            border: none;
         }
         
         .btn-danger:hover {
             background: #dc2626;
-            transform: translateY(-2px);
-        }
-        
-        .btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
         }
         
         .table-wrapper {
             overflow-x: auto;
-            border-radius: 12px;
         }
         
         table {
@@ -744,173 +699,120 @@ def dashboard():
         
         thead {
             background: #f9fafb;
-            border-bottom: 2px solid #e5e7eb;
+            border-bottom: 1px solid #e5e7eb;
         }
         
         th {
-            padding: 16px;
+            padding: 12px 16px;
             text-align: left;
             font-weight: 600;
-            color: #374151;
-            text-transform: uppercase;
+            color: #6b7280;
             font-size: 12px;
+            text-transform: uppercase;
             letter-spacing: 0.5px;
         }
         
         td {
-            padding: 16px;
+            padding: 12px 16px;
             border-bottom: 1px solid #f3f4f6;
         }
         
-        tbody tr {
-            transition: background 0.15s ease;
-        }
-        
         tbody tr:hover {
-            background: #f9fafb;
+            background: #fafafa;
         }
         
-        .status {
+        .badge {
             display: inline-block;
-            padding: 6px 12px;
-            border-radius: 20px;
-            font-size: 12px;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 11px;
             font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
         
-        .status.pending {
+        .badge-pending {
             background: #fef3c7;
             color: #92400e;
         }
         
-        .status.completed {
-            background: #dcfce7;
-            color: #166534;
+        .badge-completed {
+            background: #d1fae5;
+            color: #065f46;
         }
         
-        .status.failed {
+        .badge-failed {
             background: #fee2e2;
             color: #991b1b;
         }
         
         .actions {
             display: flex;
-            gap: 6px;
+            gap: 4px;
         }
         
         .actions button {
-            padding: 6px 12px;
-            font-size: 12px;
-            border-radius: 8px;
+            padding: 4px 8px;
+            font-size: 11px;
         }
         
-        .message {
+        .toast {
             position: fixed;
             top: 20px;
             right: 20px;
-            padding: 16px 20px;
-            border-radius: 12px;
+            padding: 12px 20px;
+            border-radius: 6px;
             display: none;
-            align-items: center;
-            gap: 12px;
-            font-size: 14px;
+            font-size: 13px;
             font-weight: 500;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
             z-index: 1000;
             animation: slideIn 0.3s ease;
         }
         
         @keyframes slideIn {
-            from {
-                transform: translateX(400px);
-                opacity: 0;
-            }
-            to {
-                transform: translateX(0);
-                opacity: 1;
-            }
+            from { transform: translateX(400px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
         }
         
-        .message.show {
-            display: flex;
-        }
-        
-        .message.success {
-            background: #10b981;
-            color: white;
-        }
-        
-        .message.error {
-            background: #ef4444;
-            color: white;
-        }
-        
-        .message.info {
-            background: #6366f1;
-            color: white;
-        }
+        .toast.show { display: block; }
+        .toast.success { background: #10b981; color: white; }
+        .toast.error { background: #ef4444; color: white; }
         
         .loading {
             text-align: center;
-            padding: 60px 20px;
-            color: #999;
+            padding: 40px;
+            color: #9ca3af;
         }
         
-        .loading i {
-            font-size: 40px;
-            margin-bottom: 16px;
-            animation: spin 2s linear infinite;
-        }
-        
-        @keyframes spin {
-            from { transform: rotate(0deg); }
-            to { transform: rotate(360deg); }
-        }
-        
-        .empty-state {
+        .empty {
             text-align: center;
             padding: 60px 20px;
-            color: #999;
-        }
-        
-        .empty-state i {
-            font-size: 48px;
-            margin-bottom: 16px;
-            opacity: 0.3;
+            color: #9ca3af;
         }
         
         @media (max-width: 768px) {
             .header {
                 flex-direction: column;
-                gap: 16px;
-                text-align: center;
+                align-items: flex-start;
             }
             
-            .stats-grid {
-                grid-template-columns: 1fr;
+            .stats {
+                grid-template-columns: 1fr 1fr;
             }
             
             .card-header {
                 flex-direction: column;
-                align-items: flex-start;
-                gap: 16px;
+                align-items: stretch;
             }
             
             .controls {
-                width: 100%;
+                flex-direction: column;
             }
             
             button {
-                flex: 1;
-                justify-content: center;
-            }
-            
-            table {
-                font-size: 12px;
-            }
-            
-            th, td {
-                padding: 12px;
+                width: 100%;
+                text-align: center;
             }
         }
     </style>
@@ -918,149 +820,122 @@ def dashboard():
 <body>
     <div class="container">
         <div class="header">
-            <div>
-                <h1>💰 Donations Admin</h1>
-            </div>
-            <div class="header-right">
-                <div class="time" id="time"></div>
-            </div>
+            <h1>Donations Admin</h1>
+            <div class="time" id="time"></div>
         </div>
         
-        <div class="stats-grid" id="statsGrid">
-            <div class="loading"><i class="fas fa-spinner"></i></div>
+        <div class="stats" id="statsContainer">
+            <div class="loading">Chargement...</div>
         </div>
         
-        <div class="content">
-            <div class="card">
-                <div class="card-header">
-                    <h2 class="card-title">Donations</h2>
-                    <div class="controls">
-                        <button class="btn btn-primary" onclick="loadData()"><i class="fas fa-sync"></i> Rafraîchir</button>
-                        <button class="btn btn-success" onclick="markAllCompleted()"><i class="fas fa-check-circle"></i> Tous completed</button>
-                        <button class="btn btn-danger" onclick="deleteAllPending()"><i class="fas fa-trash"></i> Supprimer pending</button>
-                    </div>
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Liste des donations</div>
+                <div class="controls">
+                    <button class="btn-default" onclick="loadData()">Rafraîchir</button>
+                    <button class="btn-success" onclick="markAllCompleted()">Tous completed</button>
+                    <button class="btn-danger" onclick="deleteAllPending()">Supprimer pending</button>
                 </div>
-                
-                <div class="table-wrapper">
-                    <table id="donationsTable">
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Donateur</th>
-                                <th>Receveur</th>
-                                <th>Montant</th>
-                                <th>Net</th>
-                                <th>Statut</th>
-                                <th>Date</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr><td colspan="8" class="loading"><i class="fas fa-spinner"></i> Chargement...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
+            </div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Donateur</th>
+                            <th>Receveur</th>
+                            <th>Montant</th>
+                            <th>Net</th>
+                            <th>Statut</th>
+                            <th>Date</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tableBody">
+                        <tr><td colspan="8" class="loading">Chargement...</td></tr>
+                    </tbody>
+                </table>
             </div>
         </div>
     </div>
     
-    <div class="message" id="message"></div>
+    <div class="toast" id="toast"></div>
     
     <script>
-        const API_BASE = window.location.origin;
+        const API = window.location.origin;
         const PASSWORD = new URLSearchParams(window.location.search).get('password');
         
-        function showMessage(text, type = 'info') {
-            const msg = document.getElementById('message');
-            msg.textContent = text;
-            msg.className = `message show ${type}`;
-            setTimeout(() => msg.classList.remove('show'), 3500);
+        function showToast(msg, type = 'success') {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.className = 'toast show ' + type;
+            setTimeout(() => t.classList.remove('show'), 3000);
         }
         
         function updateTime() {
-            const now = new Date();
-            document.getElementById('time').textContent = now.toLocaleTimeString('fr-FR');
+            document.getElementById('time').textContent = new Date().toLocaleTimeString('fr-FR');
         }
         setInterval(updateTime, 1000);
         updateTime();
         
         function loadStats() {
-            fetch(`${API_BASE}/admin/stats?password=${PASSWORD}`)
+            fetch(API + '/admin/stats?password=' + PASSWORD)
                 .then(r => r.json())
-                .then(data => {
-                    const grid = document.getElementById('statsGrid');
-                    grid.innerHTML = `
-                        <div class="stat-card primary">
-                            <div class="stat-label">Total</div>
-                            <div class="stat-number">${data.total}</div>
-                        </div>
-                        <div class="stat-card warning">
-                            <div class="stat-label">En attente</div>
-                            <div class="stat-number">${data.pending}</div>
-                        </div>
-                        <div class="stat-card success">
-                            <div class="stat-label">Complétées</div>
-                            <div class="stat-number">${data.completed}</div>
-                        </div>
-                        <div class="stat-card danger">
-                            <div class="stat-label">Échouées</div>
-                            <div class="stat-number">${data.failed}</div>
-                        </div>
-                    `;
+                .then(d => {
+                    document.getElementById('statsContainer').innerHTML = 
+                        '<div class="stat total"><div class="stat-label">Total</div><div class="stat-value">' + d.total + '</div></div>' +
+                        '<div class="stat pending"><div class="stat-label">Pending</div><div class="stat-value">' + d.pending + '</div></div>' +
+                        '<div class="stat completed"><div class="stat-label">Completed</div><div class="stat-value">' + d.completed + '</div></div>' +
+                        '<div class="stat failed"><div class="stat-label">Failed</div><div class="stat-value">' + d.failed + '</div></div>';
                 });
         }
         
         function loadData() {
-            fetch(`${API_BASE}/admin/donations?password=${PASSWORD}`)
+            fetch(API + '/admin/donations?password=' + PASSWORD)
                 .then(r => r.json())
-                .then(data => {
-                    const tbody = document.querySelector('tbody');
-                    if (!data.donations || data.donations.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="8" class="empty-state"><i class="fas fa-inbox"></i><br>Aucune donation</td></tr>';
+                .then(d => {
+                    const tbody = document.getElementById('tableBody');
+                    if (!d.donations || d.donations.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="8" class="empty">Aucune donation</td></tr>';
                         return;
                     }
-                    
-                    tbody.innerHTML = data.donations.map(d => `
-                        <tr>
-                            <td><strong>#${d.id}</strong></td>
-                            <td>${d.donor_name || d.player_id}</td>
-                            <td>${d.target_name || d.target_player_id}</td>
-                            <td>${d.amount_robux}R$</td>
-                            <td>${d.final_amount}R$</td>
-                            <td><span class="status ${d.status}">${d.status.toUpperCase()}</span></td>
-                            <td>${new Date(d.created_at).toLocaleDateString('fr-FR')}</td>
-                            <td>
-                                <div class="actions">
-                                    <button class="btn btn-success" onclick="changeStatus(${d.id}, 'completed')" title="Marquer complété"><i class="fas fa-check"></i></button>
-                                    <button class="btn btn-danger" onclick="deleteSingle(${d.id})" title="Supprimer"><i class="fas fa-trash"></i></button>
-                                </div>
-                            </td>
-                        </tr>
-                    `).join('');
-                })
-                .catch(e => showMessage('Erreur de chargement', 'error'));
+                    let html = '';
+                    for (let x of d.donations) {
+                        html += '<tr>' +
+                            '<td>#' + x.id + '</td>' +
+                            '<td>' + (x.donor_name || x.player_id) + '</td>' +
+                            '<td>' + (x.target_name || x.target_player_id) + '</td>' +
+                            '<td>' + x.amount_robux + 'R$</td>' +
+                            '<td>' + x.final_amount + 'R$</td>' +
+                            '<td><span class="badge badge-' + x.status + '">' + x.status + '</span></td>' +
+                            '<td>' + new Date(x.created_at).toLocaleDateString('fr-FR') + '</td>' +
+                            '<td><div class="actions">' +
+                            '<button class="btn-success" onclick="setStatus(' + x.id + ', \'completed\')">✓</button>' +
+                            '<button class="btn-danger" onclick="del(' + x.id + ')">✕</button>' +
+                            '</div></td>' +
+                            '</tr>';
+                    }
+                    tbody.innerHTML = html;
+                });
         }
         
-        function changeStatus(id, status) {
-            fetch(`${API_BASE}/admin/donations/${id}/status?password=${PASSWORD}`, {
+        function setStatus(id, s) {
+            fetch(API + '/admin/donations/' + id + '/status?password=' + PASSWORD, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ status })
-            })
-            .then(r => r.json())
-            .then(() => {
-                showMessage(`✓ Donation #${id} → ${status}`, 'success');
+                body: JSON.stringify({ status: s })
+            }).then(() => {
+                showToast('Donation #' + id + ' → ' + s);
                 loadData();
                 loadStats();
             });
         }
         
-        function deleteSingle(id) {
-            if (confirm(`Supprimer donation #${id}?`)) {
-                fetch(`${API_BASE}/admin/donations/${id}?password=${PASSWORD}`, { method: 'DELETE' })
-                    .then(r => r.json())
+        function del(id) {
+            if (confirm('Supprimer #' + id + '?')) {
+                fetch(API + '/admin/donations/' + id + '?password=' + PASSWORD, { method: 'DELETE' })
                     .then(() => {
-                        showMessage(`✓ Donation #${id} supprimée`, 'success');
+                        showToast('Donation #' + id + ' supprimée');
                         loadData();
                         loadStats();
                     });
@@ -1068,11 +943,11 @@ def dashboard():
         }
         
         function deleteAllPending() {
-            if (confirm('⚠️  Supprimer TOUTES les donations pending?\nCette action est irréversible!')) {
-                fetch(`${API_BASE}/admin/cleanup?password=${PASSWORD}`, { method: 'POST' })
+            if (confirm('Supprimer TOUTES les pending?')) {
+                fetch(API + '/admin/cleanup?password=' + PASSWORD, { method: 'POST' })
                     .then(r => r.json())
-                    .then(data => {
-                        showMessage(`✓ ${data.deleted} donations supprimées`, 'success');
+                    .then(d => {
+                        showToast(d.deleted + ' supprimées');
                         loadData();
                         loadStats();
                     });
@@ -1080,31 +955,24 @@ def dashboard():
         }
         
         function markAllCompleted() {
-            if (confirm('Marquer TOUS les pending en completed?')) {
-                fetch(`${API_BASE}/admin/mark-completed?password=${PASSWORD}`, { method: 'POST' })
+            if (confirm('Marquer tous les pending en completed?')) {
+                fetch(API + '/admin/mark-completed?password=' + PASSWORD, { method: 'POST' })
                     .then(r => r.json())
-                    .then(data => {
-                        showMessage(`✓ ${data.updated} donations marquées completed`, 'success');
+                    .then(d => {
+                        showToast(d.updated + ' marquées completed');
                         loadData();
                         loadStats();
                     });
             }
         }
         
-        // Init
         loadStats();
         loadData();
-        
-        // Refresh toutes les 15s
-        setInterval(() => {
-            loadStats();
-            loadData();
-        }, 15000);
+        setInterval(() => { loadStats(); loadData(); }, 20000);
     </script>
 </body>
 </html>"""
     return html
- 
  
 @app.route('/admin/stats', methods=['GET'])
 def admin_stats():
