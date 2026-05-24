@@ -84,11 +84,11 @@ def init_db():
 
 
 # ============================================================================
-# ROBLOX PAYOUT — RobloxPayout Class (CORRIGÉ)
+# ROBLOX PAYOUT — RobloxPayout Class (COMPLÈTEMENT CORRIGÉ)
 # ============================================================================
 
 class RobloxPayout:
-    """Gère les transferts Robux avec support Chef challenge + 2FA TOTP"""
+    """Gère les transferts Robux avec support Chef challenge + 2FA TOTP + Anti-AutomatedTampering"""
     def __init__(self, roblosecurity, group_id, twofactor_secret=""):
         self.roblosecurity = roblosecurity
         self.group_id = group_id
@@ -108,6 +108,7 @@ class RobloxPayout:
             return None
 
     def _set_csrf(self):
+        """Récupère un nouveau token CSRF"""
         try:
             r = requests.post("https://auth.roblox.com/v2/logout", headers=self.headers, timeout=5)
             token = r.headers.get('X-CSRF-TOKEN') or r.headers.get('x-csrf-token')
@@ -117,13 +118,13 @@ class RobloxPayout:
                 token = r2.headers.get('X-CSRF-TOKEN') or r2.headers.get('x-csrf-token')
             if token:
                 self.headers['X-CSRF-TOKEN'] = token
-                logger.info(f"[CSRF] Token récupéré: {token[:20]}...")
+                logger.info(f"[CSRF] ✅ Token récupéré: {token[:20]}...")
                 return True
             else:
-                logger.warning("[CSRF] Pas de token trouvé, on continue quand même...")
+                logger.warning("[CSRF] ⚠️ Pas de token trouvé, on continue quand même...")
                 return True
         except Exception as e:
-            logger.error(f"[Cookie] Erreur CSRF: {e}")
+            logger.error(f"[CSRF] ❌ Erreur: {e}")
             return False
 
     def _payout_request(self, user_id, amount, extra_headers=None):
@@ -143,32 +144,32 @@ class RobloxPayout:
     def _verify_totp(self, sender_id, challenge_id):
         code = self._get_totp()
         if not code:
-            logger.error("[2FA] Pas de TOTP disponible")
+            logger.error("[2FA] ❌ Pas de TOTP disponible")
             return None
         try:
-            logger.info(f"[2FA] Envoi verify: sender_id={sender_id}, challenge_id={challenge_id}, code={code}")
+            logger.info(f"[2FA] 📱 Envoi verify: sender_id={sender_id}, code={code}")
             r = requests.post(
                 f"https://twostepverification.roblox.com/v1/users/{sender_id}/challenges/authenticator/verify",
                 headers=self.headers,
                 json={"actionType": "Generic", "challengeId": challenge_id, "code": code},
                 timeout=10
             )
-            logger.info(f"[2FA] Response status: {r.status_code}")
+            logger.info(f"[2FA] HTTP {r.status_code}")
 
             if r.status_code != 200:
-                logger.error(f"[2FA] HTTP {r.status_code}: {r.text[:200]}")
+                logger.error(f"[2FA] ❌ HTTP {r.status_code}: {r.text[:200]}")
                 return None
 
             data = r.json()
             if "errors" in data:
-                logger.error(f"[2FA] Erreur verify: {data['errors'][0].get('message', 'unknown')}")
+                logger.error(f"[2FA] ❌ Erreur: {data['errors'][0].get('message', 'unknown')}")
                 return None
 
             vtoken = data.get("verificationToken")
-            logger.info(f"[2FA] ✅ Verification token reçu: {vtoken[:20] if vtoken else 'None'}...")
+            logger.info(f"[2FA] ✅ Token reçu: {vtoken[:20] if vtoken else 'None'}...")
             return vtoken
         except Exception as e:
-            logger.error(f"[2FA] Erreur requête verify: {e}")
+            logger.error(f"[2FA] ❌ Exception: {e}")
             import traceback
             logger.error(traceback.format_exc())
             return None
@@ -187,22 +188,23 @@ class RobloxPayout:
             )
             logger.info(f"[Challenge] Continue {challenge_type}: HTTP {resp.status_code}")
             if resp.status_code >= 400:
-                logger.warning(f"[Challenge] Response: {resp.text[:200]}")
+                logger.warning(f"[Challenge] ⚠️ Response: {resp.text[:200]}")
             return resp
         except Exception as e:
-            logger.error(f"[Challenge] Erreur continue: {e}")
+            logger.error(f"[Challenge] ❌ Exception: {e}")
             return None
 
-    def payout(self, user_id, amount):
-        """Effectue un payout avec gestion automatique des challenges."""
+    def payout(self, user_id, amount, retry_count=0, max_retries=3):
+        """Effectue un payout avec gestion complète des challenges et retry logic."""
+        
         if not self._set_csrf():
             return False, "Cookie invalide ou expiré"
 
-        logger.info(f"[Cookie] Tentative payout: {amount} R$ → {user_id}")
+        logger.info(f"[Payout] 🔄 Tentative {retry_count + 1}/{max_retries + 1}: {amount} R$ → {user_id}")
         r = self._payout_request(user_id, amount)
 
         if r.status_code == 200:
-            logger.info("✅ [Cookie] Payout réussi sans challenge")
+            logger.info("✅ [Payout] Réussi sans challenge!")
             return True, "ok"
 
         challenge_type     = r.headers.get("rblx-challenge-type", "").lower()
@@ -210,16 +212,16 @@ class RobloxPayout:
         challenge_meta_b64 = r.headers.get("rblx-challenge-metadata", "")
 
         if not challenge_type or not challenge_id:
-            logger.error(f"[Cookie] Pas de challenge headers — HTTP {r.status_code}: {r.text}")
+            logger.error(f"[Payout] ❌ Pas de challenge headers — HTTP {r.status_code}")
             return False, f"No challenge headers (HTTP {r.status_code})"
 
         # ── CHEF CHALLENGE ──────────────────────────────────────────────────
         if challenge_type == "chef":
-            logger.info("[Chef] Chef challenge détecté")
+            logger.info("[Chef] 👨‍🍳 Challenge détecté")
             try:
                 chef_meta = json.loads(base64.b64decode(challenge_meta_b64))
             except Exception as e:
-                logger.error(f"[Chef] Erreur decode metadata: {e}")
+                logger.error(f"[Chef] ❌ Erreur decode: {e}")
                 return False, "Chef metadata decode failed"
 
             cont = self._continue_challenge(challenge_id, "chef", chef_meta)
@@ -231,9 +233,8 @@ class RobloxPayout:
             next_meta_raw = cont_data.get("challengeMetadata", "")
 
             if next_type == "":
-                # Chef passé sans 2FA
-                logger.info("[Chef] Passé sans 2FA, retry payout...")
-                time.sleep(1.5)  # anti-AutomatedTampering
+                logger.info("[Chef] ✅ Passé sans 2FA")
+                time.sleep(5.0)  # ⏳ Délai anti-tampering
                 final = self._payout_request(user_id, amount, {
                     "rblx-challenge-id":       challenge_id,
                     "rblx-challenge-type":     "chef",
@@ -241,21 +242,20 @@ class RobloxPayout:
                 })
 
             elif next_type == "twostepverification":
-                logger.info("[Chef] Unlock 2FA required")
+                logger.info("[Chef] 🔐 Déverrouillage 2FA requis")
                 try:
                     tfa_meta = json.loads(next_meta_raw)
                     tfa_user = tfa_meta["userId"]
                     tfa_cid  = tfa_meta["challengeId"]
                 except Exception as e:
-                    logger.error(f"[2FA] Erreur parse metadata: {e}")
+                    logger.error(f"[Chef+2FA] ❌ Erreur parse: {e}")
                     return False, "2FA metadata parse failed"
 
                 vtoken = self._verify_totp(tfa_user, tfa_cid)
                 if not vtoken:
                     return False, "2FA TOTP verification failed"
 
-                # Boucler le challenge avec le verificationToken
-                time.sleep(2.0)  # anti-AutomatedTampering
+                time.sleep(5.0)  # ⏳ Délai après 2FA
                 complete_meta = {
                     "verificationToken": vtoken,
                     "rememberDevice": False,
@@ -264,53 +264,63 @@ class RobloxPayout:
                 }
                 cont2 = self._continue_challenge(challenge_id, "twostepverification", complete_meta)
                 if not cont2 or cont2.status_code >= 400:
-                    logger.error(f"[Chef+2FA] Continue après 2FA échoué: {cont2.text if cont2 else 'None'}")
+                    logger.error(f"[Chef+2FA] ❌ Continue échoué")
                     return False, "2FA continue failed"
 
                 cont2_data = cont2.json()
-                logger.info(f"[Chef+2FA] cont2 response: {cont2_data}")
-
-                # ✅ FIX : détecter blocksession AVANT de retenter le payout
                 cont2_type = cont2_data.get("challengeType", "")
+                
                 if cont2_type == "blocksession":
-                    logger.error("[Chef+2FA] Session bloquée après 2FA (AutomatedTampering) — abandon")
-                    return False, "Session bloquée — réessayez dans 1 minute"
+                    logger.warning("[Chef+2FA] 🔒 Session bloquée détectée")
+                    if retry_count < max_retries:
+                        logger.info(f"[Chef+2FA] ⏳ Attente 15s avant retry...")
+                        time.sleep(15.0)  # ⏳ Attendre longtemps
+                        self._set_csrf()  # Renouveler le CSRF
+                        return self.payout(user_id, amount, retry_count + 1, max_retries)
+                    else:
+                        logger.error("[Chef+2FA] ❌ Max retries atteint")
+                        return False, "Session bloquée après max retries"
 
-                # cont2_type == "" → challenge complété, on peut retenter
-                logger.info("[Chef+2FA] Challenge complété, retry payout sans headers challenge...")
-                time.sleep(2.0)  # anti-AutomatedTampering
+                logger.info("[Chef+2FA] ✅ Challenge complété")
+                time.sleep(5.0)  # ⏳ Délai avant final payout
                 final = self._payout_request(user_id, amount)
 
             elif next_type == "blocksession":
-                logger.error("[Chef] Session bloquée (AutomatedTampering)")
-                return False, "Session bloquée — réessayez dans 1 minute"
+                logger.warning("[Chef] 🔒 Session bloquée")
+                if retry_count < max_retries:
+                    logger.info(f"[Chef] ⏳ Attente 15s avant retry...")
+                    time.sleep(15.0)
+                    self._set_csrf()
+                    return self.payout(user_id, amount, retry_count + 1, max_retries)
+                else:
+                    return False, "Session bloquée après max retries"
             else:
-                logger.error(f"[Chef] Challenge inconnu: {next_type}")
+                logger.error(f"[Chef] ❌ Challenge inconnu: {next_type}")
                 return False, f"Unknown challenge: {next_type}"
 
             if final.status_code == 200:
-                logger.info("✅ [Chef] Payout réussi après chef!")
+                logger.info("✅ [Chef] Payout réussi!")
                 return True, "ok"
             else:
-                logger.error(f"❌ [Chef] Payout échoué après chef: {final.text}")
+                logger.error(f"❌ [Chef] Payout échoué: {final.text[:200]}")
                 return False, final.text
 
         # ── TWOSTEPVERIFICATION DIRECT ──────────────────────────────────────
         elif challenge_type == "twostepverification":
-            logger.info("[2FA] 2FA directe (pas chef)")
+            logger.info("[2FA] 🔐 Challenge direct")
             try:
                 meta   = json.loads(base64.b64decode(challenge_meta_b64))
                 sender = meta["userId"]
                 cid    = meta["challengeId"]
             except Exception as e:
-                logger.error(f"[2FA] Erreur parse metadata: {e}")
+                logger.error(f"[2FA] ❌ Erreur parse: {e}")
                 return False, "2FA metadata parse failed"
 
             vtoken = self._verify_totp(sender, cid)
             if not vtoken:
                 return False, "2FA TOTP verification failed"
 
-            time.sleep(2.0)  # anti-AutomatedTampering
+            time.sleep(5.0)  # ⏳ Délai après 2FA
             complete_meta = {
                 "verificationToken": vtoken,
                 "rememberDevice": False,
@@ -319,34 +329,45 @@ class RobloxPayout:
             }
             cont2 = self._continue_challenge(challenge_id, "twostepverification", complete_meta)
             if not cont2 or cont2.status_code >= 400:
-                logger.error(f"[2FA] Continue après 2FA échoué: {cont2.text if cont2 else 'None'}")
+                logger.error(f"[2FA] ❌ Continue échoué")
                 return False, "2FA continue failed"
 
             cont2_data = cont2.json()
-            logger.info(f"[2FA] cont2 response: {cont2_data}")
-
-            # ✅ FIX : détecter blocksession AVANT de retenter le payout
             cont2_type = cont2_data.get("challengeType", "")
+            
             if cont2_type == "blocksession":
-                logger.error("[2FA] Session bloquée après 2FA (AutomatedTampering) — abandon")
-                return False, "Session bloquée — réessayez dans 1 minute"
+                logger.warning("[2FA] 🔒 Session bloquée détectée")
+                if retry_count < max_retries:
+                    logger.info(f"[2FA] ⏳ Attente 15s avant retry...")
+                    time.sleep(15.0)
+                    self._set_csrf()
+                    return self.payout(user_id, amount, retry_count + 1, max_retries)
+                else:
+                    logger.error("[2FA] ❌ Max retries atteint")
+                    return False, "Session bloquée après max retries"
 
-            logger.info("[2FA] Challenge complété, retry payout sans headers challenge...")
-            time.sleep(2.0)  # anti-AutomatedTampering
+            logger.info("[2FA] ✅ Challenge complété")
+            time.sleep(5.0)  # ⏳ Délai avant final payout
             final = self._payout_request(user_id, amount)
 
             if final.status_code == 200:
-                logger.info("✅ [2FA] Payout réussi après 2FA!")
+                logger.info("✅ [2FA] Payout réussi!")
                 return True, "ok"
             else:
-                logger.error(f"❌ [2FA] Payout échoué après 2FA: {final.text}")
+                logger.error(f"❌ [2FA] Payout échoué: {final.text[:200]}")
                 return False, final.text
 
         elif challenge_type == "blocksession":
-            logger.error("[Cookie] Session bloquée sur première requête")
-            return False, "Session bloquée — réessayez dans 1 minute"
+            logger.warning("[Payout] 🔒 Session bloquée dès le départ")
+            if retry_count < max_retries:
+                logger.info(f"[Payout] ⏳ Attente 15s avant retry...")
+                time.sleep(15.0)
+                self._set_csrf()
+                return self.payout(user_id, amount, retry_count + 1, max_retries)
+            else:
+                return False, "Session bloquée après max retries"
         else:
-            logger.error(f"[Cookie] Challenge inconnu: {challenge_type}")
+            logger.error(f"[Payout] ❌ Challenge inconnu: {challenge_type}")
             return False, f"Unknown challenge: {challenge_type}"
 
 
@@ -412,7 +433,7 @@ def transfer_robux_opencloud(target_user_id, amount_robux):
     payload = {
         "payouts": [{"userId": str(target_user_id), "amount": amount_robux}]
     }
-    logger.info(f"[OpenCloud] Tentative: {amount_robux} R$ → user {target_user_id}")
+    logger.info(f"[OpenCloud] 📤 Tentative: {amount_robux} R$ → user {target_user_id}")
     try:
         response = requests.post(
             f"https://apis.roblox.com/cloud/v2/groups/{GROUP_ID}/payouts",
