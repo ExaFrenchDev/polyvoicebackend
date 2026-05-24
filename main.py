@@ -7,17 +7,9 @@ import logging
 import requests
 import math
 import json
-import base64
-import time
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
-
-try:
-    import pyotp
-    PYOTP_AVAILABLE = True
-except ImportError:
-    PYOTP_AVAILABLE = False
 
 load_dotenv()
 
@@ -26,8 +18,6 @@ app = Flask(__name__)
 # Configuration
 WEBHOOK_SECRET       = os.getenv("WEBHOOK_SECRET", "")
 GROUP_ID             = int(os.getenv("GROUP_ID", "0"))
-ACCOUNT_COOKIE       = os.getenv("ROBLOX_ACCOUNT_COOKIE", "")
-ROBLOX_2FA_SECRET    = os.getenv("ROBLOX_2FA_SECRET", "")
 ROBLOX_API_KEY       = os.getenv("ROBLOX_API_KEY", "")
 DISCORD_WEBHOOK_URL  = os.getenv("DISCORD_WEBHOOK_URL", "")
 ADMIN_PASSWORD       = os.getenv("ADMIN_PASSWORD", "exa14170.")
@@ -84,291 +74,98 @@ def init_db():
 
 
 # ============================================================================
-# ROBLOX PAYOUT — RobloxPayout Class (COMPLÈTEMENT CORRIGÉ)
+# ROBLOX OPENCLOUD API (SEULE MÉTHODE UTILISÉE)
 # ============================================================================
 
-class RobloxPayout:
-    """Gère les transferts Robux avec support Chef challenge + 2FA TOTP + Anti-AutomatedTampering"""
-    def __init__(self, roblosecurity, group_id, twofactor_secret=""):
-        self.roblosecurity = roblosecurity
-        self.group_id = group_id
-        self.twofactor_secret = twofactor_secret
-        self.headers = {
-            'Cookie': '.ROBLOSECURITY=' + self.roblosecurity,
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0'
-        }
-
-    def _get_totp(self):
-        if not PYOTP_AVAILABLE or not self.twofactor_secret:
-            return None
-        try:
-            return pyotp.TOTP(self.twofactor_secret).now()
-        except Exception as e:
-            logger.error(f"[2FA] Erreur TOTP: {e}")
-            return None
-
-    def _set_csrf(self):
-        """Récupère un nouveau token CSRF"""
-        try:
-            r = requests.post("https://auth.roblox.com/v2/logout", headers=self.headers, timeout=5)
-            token = r.headers.get('X-CSRF-TOKEN') or r.headers.get('x-csrf-token')
-            if not token:
-                r2 = requests.get(f"https://groups.roblox.com/v1/groups/{self.group_id}",
-                                  headers=self.headers, timeout=5)
-                token = r2.headers.get('X-CSRF-TOKEN') or r2.headers.get('x-csrf-token')
-            if token:
-                self.headers['X-CSRF-TOKEN'] = token
-                logger.info(f"[CSRF] ✅ Token récupéré: {token[:20]}...")
-                return True
-            else:
-                logger.warning("[CSRF] ⚠️ Pas de token trouvé, on continue quand même...")
-                return True
-        except Exception as e:
-            logger.error(f"[CSRF] ❌ Erreur: {e}")
-            return False
-
-    def _payout_request(self, user_id, amount, extra_headers=None):
-        h = self.headers.copy()
-        if extra_headers:
-            h.update(extra_headers)
-        return requests.post(
-            f"https://groups.roblox.com/v1/groups/{self.group_id}/payouts",
-            headers=h,
-            json={
-                "PayoutType": 1,
-                "Recipients": [{"amount": amount, "recipientId": user_id, "recipientType": 0}]
-            },
+def transfer_robux_opencloud(target_user_id, amount_robux, retry_count=0, max_retries=3):
+    """
+    Transfert Robux via OpenCloud API (MÉTHODE RECOMMANDÉE)
+    - Pas de cookie qui expire
+    - Conçu pour l'automatisation
+    - Très fiable
+    """
+    if not ROBLOX_API_KEY:
+        logger.error("❌ [OpenCloud] ROBLOX_API_KEY non configurée!")
+        return False, {"error": "ROBLOX_API_KEY not configured", "timestamp": datetime.utcnow().isoformat() + "Z"}
+    
+    headers = {
+        "x-api-key": ROBLOX_API_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "payouts": [{"userId": str(target_user_id), "amount": amount_robux}]
+    }
+    
+    logger.info(f"[OpenCloud] 📤 Tentative {retry_count + 1}/{max_retries + 1}: {amount_robux} R$ → user {target_user_id}")
+    
+    try:
+        response = requests.post(
+            f"https://apis.roblox.com/cloud/v2/groups/{GROUP_ID}/payouts",
+            json=payload,
+            headers=headers,
             timeout=10
         )
-
-    def _verify_totp(self, sender_id, challenge_id):
-        code = self._get_totp()
-        if not code:
-            logger.error("[2FA] ❌ Pas de TOTP disponible")
-            return None
-        try:
-            logger.info(f"[2FA] 📱 Envoi verify: sender_id={sender_id}, code={code}")
-            r = requests.post(
-                f"https://twostepverification.roblox.com/v1/users/{sender_id}/challenges/authenticator/verify",
-                headers=self.headers,
-                json={"actionType": "Generic", "challengeId": challenge_id, "code": code},
-                timeout=10
-            )
-            logger.info(f"[2FA] HTTP {r.status_code}")
-
-            if r.status_code != 200:
-                logger.error(f"[2FA] ❌ HTTP {r.status_code}: {r.text[:200]}")
-                return None
-
-            data = r.json()
-            if "errors" in data:
-                logger.error(f"[2FA] ❌ Erreur: {data['errors'][0].get('message', 'unknown')}")
-                return None
-
-            vtoken = data.get("verificationToken")
-            logger.info(f"[2FA] ✅ Token reçu: {vtoken[:20] if vtoken else 'None'}...")
-            return vtoken
-        except Exception as e:
-            logger.error(f"[2FA] ❌ Exception: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return None
-
-    def _continue_challenge(self, challenge_id, challenge_type, metadata):
-        try:
-            resp = requests.post(
-                "https://apis.roblox.com/challenge/v1/continue",
-                headers=self.headers,
-                json={
-                    "challengeId": challenge_id,
-                    "challengeType": challenge_type,
-                    "challengeMetadata": json.dumps(metadata)
-                },
-                timeout=10
-            )
-            logger.info(f"[Challenge] Continue {challenge_type}: HTTP {resp.status_code}")
-            if resp.status_code >= 400:
-                logger.warning(f"[Challenge] ⚠️ Response: {resp.text[:200]}")
-            return resp
-        except Exception as e:
-            logger.error(f"[Challenge] ❌ Exception: {e}")
-            return None
-
-    def payout(self, user_id, amount, retry_count=0, max_retries=3):
-        """Effectue un payout avec gestion complète des challenges et retry logic."""
         
-        if not self._set_csrf():
-            return False, "Cookie invalide ou expiré"
-
-        logger.info(f"[Payout] 🔄 Tentative {retry_count + 1}/{max_retries + 1}: {amount} R$ → {user_id}")
-        r = self._payout_request(user_id, amount)
-
-        if r.status_code == 200:
-            logger.info("✅ [Payout] Réussi sans challenge!")
-            return True, "ok"
-
-        challenge_type     = r.headers.get("rblx-challenge-type", "").lower()
-        challenge_id       = r.headers.get("rblx-challenge-id", "")
-        challenge_meta_b64 = r.headers.get("rblx-challenge-metadata", "")
-
-        if not challenge_type or not challenge_id:
-            logger.error(f"[Payout] ❌ Pas de challenge headers — HTTP {r.status_code}")
-            return False, f"No challenge headers (HTTP {r.status_code})"
-
-        # ── CHEF CHALLENGE ──────────────────────────────────────────────────
-        if challenge_type == "chef":
-            logger.info("[Chef] 👨‍🍳 Challenge détecté")
-            try:
-                chef_meta = json.loads(base64.b64decode(challenge_meta_b64))
-            except Exception as e:
-                logger.error(f"[Chef] ❌ Erreur decode: {e}")
-                return False, "Chef metadata decode failed"
-
-            cont = self._continue_challenge(challenge_id, "chef", chef_meta)
-            if not cont:
-                return False, "Chef continue failed"
-
-            cont_data    = cont.json()
-            next_type    = cont_data.get("challengeType", "")
-            next_meta_raw = cont_data.get("challengeMetadata", "")
-
-            if next_type == "":
-                logger.info("[Chef] ✅ Passé sans 2FA")
-                time.sleep(5.0)  # ⏳ Délai anti-tampering
-                final = self._payout_request(user_id, amount, {
-                    "rblx-challenge-id":       challenge_id,
-                    "rblx-challenge-type":     "chef",
-                    "rblx-challenge-metadata": challenge_meta_b64
-                })
-
-            elif next_type == "twostepverification":
-                logger.info("[Chef] 🔐 Déverrouillage 2FA requis")
-                try:
-                    tfa_meta = json.loads(next_meta_raw)
-                    tfa_user = tfa_meta["userId"]
-                    tfa_cid  = tfa_meta["challengeId"]
-                except Exception as e:
-                    logger.error(f"[Chef+2FA] ❌ Erreur parse: {e}")
-                    return False, "2FA metadata parse failed"
-
-                vtoken = self._verify_totp(tfa_user, tfa_cid)
-                if not vtoken:
-                    return False, "2FA TOTP verification failed"
-
-                time.sleep(5.0)  # ⏳ Délai après 2FA
-                complete_meta = {
-                    "verificationToken": vtoken,
-                    "rememberDevice": False,
-                    "userId": tfa_user,
-                    "challengeId": tfa_cid,
-                }
-                cont2 = self._continue_challenge(challenge_id, "twostepverification", complete_meta)
-                if not cont2 or cont2.status_code >= 400:
-                    logger.error(f"[Chef+2FA] ❌ Continue échoué")
-                    return False, "2FA continue failed"
-
-                cont2_data = cont2.json()
-                cont2_type = cont2_data.get("challengeType", "")
-                
-                if cont2_type == "blocksession":
-                    logger.warning("[Chef+2FA] 🔒 Session bloquée détectée")
-                    if retry_count < max_retries:
-                        logger.info(f"[Chef+2FA] ⏳ Attente 15s avant retry...")
-                        time.sleep(15.0)  # ⏳ Attendre longtemps
-                        self._set_csrf()  # Renouveler le CSRF
-                        return self.payout(user_id, amount, retry_count + 1, max_retries)
-                    else:
-                        logger.error("[Chef+2FA] ❌ Max retries atteint")
-                        return False, "Session bloquée après max retries"
-
-                logger.info("[Chef+2FA] ✅ Challenge complété")
-                time.sleep(5.0)  # ⏳ Délai avant final payout
-                final = self._payout_request(user_id, amount)
-
-            elif next_type == "blocksession":
-                logger.warning("[Chef] 🔒 Session bloquée")
-                if retry_count < max_retries:
-                    logger.info(f"[Chef] ⏳ Attente 15s avant retry...")
-                    time.sleep(15.0)
-                    self._set_csrf()
-                    return self.payout(user_id, amount, retry_count + 1, max_retries)
-                else:
-                    return False, "Session bloquée après max retries"
-            else:
-                logger.error(f"[Chef] ❌ Challenge inconnu: {next_type}")
-                return False, f"Unknown challenge: {next_type}"
-
-            if final.status_code == 200:
-                logger.info("✅ [Chef] Payout réussi!")
-                return True, "ok"
-            else:
-                logger.error(f"❌ [Chef] Payout échoué: {final.text[:200]}")
-                return False, final.text
-
-        # ── TWOSTEPVERIFICATION DIRECT ──────────────────────────────────────
-        elif challenge_type == "twostepverification":
-            logger.info("[2FA] 🔐 Challenge direct")
-            try:
-                meta   = json.loads(base64.b64decode(challenge_meta_b64))
-                sender = meta["userId"]
-                cid    = meta["challengeId"]
-            except Exception as e:
-                logger.error(f"[2FA] ❌ Erreur parse: {e}")
-                return False, "2FA metadata parse failed"
-
-            vtoken = self._verify_totp(sender, cid)
-            if not vtoken:
-                return False, "2FA TOTP verification failed"
-
-            time.sleep(5.0)  # ⏳ Délai après 2FA
-            complete_meta = {
-                "verificationToken": vtoken,
-                "rememberDevice": False,
-                "userId": sender,
-                "challengeId": cid,
-            }
-            cont2 = self._continue_challenge(challenge_id, "twostepverification", complete_meta)
-            if not cont2 or cont2.status_code >= 400:
-                logger.error(f"[2FA] ❌ Continue échoué")
-                return False, "2FA continue failed"
-
-            cont2_data = cont2.json()
-            cont2_type = cont2_data.get("challengeType", "")
-            
-            if cont2_type == "blocksession":
-                logger.warning("[2FA] 🔒 Session bloquée détectée")
-                if retry_count < max_retries:
-                    logger.info(f"[2FA] ⏳ Attente 15s avant retry...")
-                    time.sleep(15.0)
-                    self._set_csrf()
-                    return self.payout(user_id, amount, retry_count + 1, max_retries)
-                else:
-                    logger.error("[2FA] ❌ Max retries atteint")
-                    return False, "Session bloquée après max retries"
-
-            logger.info("[2FA] ✅ Challenge complété")
-            time.sleep(5.0)  # ⏳ Délai avant final payout
-            final = self._payout_request(user_id, amount)
-
-            if final.status_code == 200:
-                logger.info("✅ [2FA] Payout réussi!")
-                return True, "ok"
-            else:
-                logger.error(f"❌ [2FA] Payout échoué: {final.text[:200]}")
-                return False, final.text
-
-        elif challenge_type == "blocksession":
-            logger.warning("[Payout] 🔒 Session bloquée dès le départ")
+        roblox_proof = {
+            "method": "open_cloud",
+            "endpoint": f"cloud/v2/groups/{GROUP_ID}/payouts",
+            "recipientId": target_user_id,
+            "amountSent": amount_robux,
+            "httpStatus": response.status_code,
+            "response": response.json() if response.content else {},
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        
+        if response.status_code == 200:
+            logger.info(f"✅ [OpenCloud] Réussi: {amount_robux} R$ → {target_user_id}")
+            return True, roblox_proof
+        
+        elif response.status_code == 429:
+            # Rate limit - attendre et retry
+            logger.warning(f"⏳ [OpenCloud] Rate limit (429) - attente 10s...")
             if retry_count < max_retries:
-                logger.info(f"[Payout] ⏳ Attente 15s avant retry...")
-                time.sleep(15.0)
-                self._set_csrf()
-                return self.payout(user_id, amount, retry_count + 1, max_retries)
+                import time
+                time.sleep(10.0)
+                return transfer_robux_opencloud(target_user_id, amount_robux, retry_count + 1, max_retries)
             else:
-                return False, "Session bloquée après max retries"
+                logger.error(f"❌ [OpenCloud] Rate limit après max retries")
+                return False, roblox_proof
+        
+        elif response.status_code == 401:
+            logger.error(f"❌ [OpenCloud] HTTP 401 - API KEY INVALIDE")
+            return False, roblox_proof
+        
+        elif response.status_code == 404:
+            logger.error(f"❌ [OpenCloud] HTTP 404 - Groupe ou utilisateur introuvable")
+            return False, roblox_proof
+        
         else:
-            logger.error(f"[Payout] ❌ Challenge inconnu: {challenge_type}")
-            return False, f"Unknown challenge: {challenge_type}"
+            logger.error(f"❌ [OpenCloud] HTTP {response.status_code}: {response.text}")
+            return False, roblox_proof
+    
+    except requests.exceptions.Timeout:
+        logger.error(f"⏳ [OpenCloud] Timeout - attente 5s et retry...")
+        if retry_count < max_retries:
+            import time
+            time.sleep(5.0)
+            return transfer_robux_opencloud(target_user_id, amount_robux, retry_count + 1, max_retries)
+        else:
+            logger.error(f"❌ [OpenCloud] Timeout après max retries")
+            return False, {"error": "Timeout after retries", "timestamp": datetime.utcnow().isoformat() + "Z"}
+    
+    except Exception as e:
+        logger.error(f"❌ [OpenCloud] Exception: {e}")
+        if retry_count < max_retries:
+            import time
+            time.sleep(3.0)
+            return transfer_robux_opencloud(target_user_id, amount_robux, retry_count + 1, max_retries)
+        else:
+            return False, {"error": str(e), "timestamp": datetime.utcnow().isoformat() + "Z"}
+
+
+def transfer_robux(target_user_id, amount_robux):
+    """Wrapper pour compatibilité"""
+    return transfer_robux_opencloud(target_user_id, amount_robux)
 
 
 # ============================================================================
@@ -423,69 +220,6 @@ def check_eligibility(user_id, group_id, days_required=MIN_GROUP_TENURE_DAYS):
         except Exception as e:
             logger.error(f"Erreur parsing date: {e}")
     return {"eligible": True, "reason": "Meets all requirements"}
-
-
-def transfer_robux_opencloud(target_user_id, amount_robux):
-    headers = {
-        "x-api-key": ROBLOX_API_KEY,
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "payouts": [{"userId": str(target_user_id), "amount": amount_robux}]
-    }
-    logger.info(f"[OpenCloud] 📤 Tentative: {amount_robux} R$ → user {target_user_id}")
-    try:
-        response = requests.post(
-            f"https://apis.roblox.com/cloud/v2/groups/{GROUP_ID}/payouts",
-            json=payload, headers=headers, timeout=10
-        )
-        roblox_proof = {
-            "method": "open_cloud",
-            "endpoint": f"cloud/v2/groups/{GROUP_ID}/payouts",
-            "recipientId": target_user_id,
-            "amountSent": amount_robux,
-            "httpStatus": response.status_code,
-            "response": response.json() if response.content else {},
-            "timestamp": datetime.utcnow().isoformat() + "Z"
-        }
-        if response.status_code == 200:
-            logger.info(f"✅ [OpenCloud] Réussi: {amount_robux} R$ → {target_user_id}")
-            return True, roblox_proof
-        else:
-            logger.error(f"❌ [OpenCloud] HTTP {response.status_code}: {response.text}")
-            return False, roblox_proof
-    except Exception as e:
-        logger.error(f"❌ [OpenCloud] Exception: {e}")
-        return False, {"error": str(e), "timestamp": datetime.utcnow().isoformat() + "Z"}
-
-
-def transfer_robux_cookie_2fa(target_user_id, amount_robux):
-    payout = RobloxPayout(ACCOUNT_COOKIE, GROUP_ID, ROBLOX_2FA_SECRET)
-    success, detail = payout.payout(target_user_id, amount_robux)
-    proof = {
-        "method": "cookie_2fa" if ROBLOX_2FA_SECRET else "cookie_only",
-        "endpoint": f"groups/{GROUP_ID}/payouts",
-        "recipientId": target_user_id,
-        "amountSent": amount_robux,
-        "httpStatus": 200 if success else 403,
-        "response": {"detail": detail},
-        "timestamp": datetime.utcnow().isoformat() + "Z"
-    }
-    return success, proof
-
-
-def transfer_robux(target_user_id, amount_robux):
-    if ROBLOX_API_KEY:
-        success, proof = transfer_robux_opencloud(target_user_id, amount_robux)
-        if success:
-            return True, proof
-        logger.warning("[Payout] Open Cloud échoué, fallback Cookie+2FA...")
-
-    if ACCOUNT_COOKIE:
-        return transfer_robux_cookie_2fa(target_user_id, amount_robux)
-
-    logger.error("[Payout] Aucune méthode configurée (ni API key ni cookie)")
-    return False, {"error": "No auth method configured", "timestamp": datetime.utcnow().isoformat() + "Z"}
 
 
 # ============================================================================
@@ -1270,10 +1004,11 @@ else:
     logger.warning("⚠️ DATABASE_URL non configurée")
 
 logger.info(f"🔧 DevProducts: {list(DEVPRODUCT_AMOUNTS.keys())}")
-logger.info(f"🔑 Roblox API Key: {'✅ OK (Open Cloud)' if ROBLOX_API_KEY else '❌ non configurée'}")
-logger.info(f"🍪 Cookie Roblox:  {'✅ OK' if ACCOUNT_COOKIE else '❌ non configuré'}")
-logger.info(f"🔐 2FA TOTP:       {'✅ OK (pyotp)' if ROBLOX_2FA_SECRET and PYOTP_AVAILABLE else '❌ non configuré'}")
+logger.info(f"🔑 Roblox API Key: {'✅ OK (OpenCloud UNIQUEMENT)' if ROBLOX_API_KEY else '❌ MANQUANTE - CONFIGURE-LA!'}")
 logger.info(f"🔔 Discord:        {'✅ OK' if DISCORD_WEBHOOK_URL else '❌ non configuré'}")
+
+if not ROBLOX_API_KEY:
+    logger.critical("❌ ROBLOX_API_KEY est OBLIGATOIRE! Configure-la dans les variables d'environnement.")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False, use_reloader=False)
