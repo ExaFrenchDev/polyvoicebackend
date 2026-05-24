@@ -540,280 +540,103 @@ def dashboard():
     <title>Admin Donations</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             background: #f5f5f5;
             color: #1f2937;
-            line-height: 1.6;
         }
-        
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
         .header {
-            background: white;
-            padding: 24px;
-            border-radius: 8px;
-            margin-bottom: 24px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+            background: white; padding: 24px; border-radius: 8px;
+            margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            display: flex; justify-content: space-between; align-items: center;
         }
-        
-        .header h1 {
-            font-size: 24px;
-            font-weight: 600;
-        }
-        
-        .time {
-            font-size: 14px;
-            color: #6b7280;
-            font-weight: 500;
-        }
-        
+        .header h1 { font-size: 24px; font-weight: 600; }
+        .time { font-size: 14px; color: #6b7280; font-weight: 500; }
         .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px;
-            margin-bottom: 24px;
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px; margin-bottom: 24px;
         }
-        
         .stat {
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            border-left: 4px solid #e5e7eb;
+            background: white; padding: 20px; border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 4px solid #e5e7eb;
         }
-        
         .stat.total { border-left-color: #6b7280; }
         .stat.pending { border-left-color: #f59e0b; }
         .stat.completed { border-left-color: #10b981; }
         .stat.failed { border-left-color: #ef4444; }
-        
         .stat-label {
-            font-size: 12px;
-            color: #6b7280;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-bottom: 8px;
-            font-weight: 600;
+            font-size: 12px; color: #6b7280; text-transform: uppercase;
+            letter-spacing: 0.5px; margin-bottom: 8px; font-weight: 600;
         }
-        
-        .stat-value {
-            font-size: 32px;
-            font-weight: 700;
-            color: #1f2937;
-        }
-        
+        .stat-value { font-size: 32px; font-weight: 700; color: #1f2937; }
         .card {
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            overflow: hidden;
+            background: white; border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow: hidden;
         }
-        
         .card-header {
-            padding: 20px 24px;
-            border-bottom: 1px solid #e5e7eb;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 16px;
+            padding: 20px 24px; border-bottom: 1px solid #e5e7eb;
+            display: flex; justify-content: space-between; align-items: center;
+            flex-wrap: wrap; gap: 16px;
         }
-        
-        .card-title {
-            font-size: 16px;
-            font-weight: 600;
-        }
-        
-        .controls {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-        
+        .card-title { font-size: 16px; font-weight: 600; }
+        .controls { display: flex; gap: 8px; flex-wrap: wrap; }
         button {
-            padding: 8px 16px;
-            border: none;
-            border-radius: 6px;
-            font-size: 13px;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            white-space: nowrap;
+            padding: 8px 16px; border: none; border-radius: 6px;
+            font-size: 13px; font-weight: 500; cursor: pointer;
+            transition: all 0.2s ease; white-space: nowrap;
         }
-        
         .btn-default {
-            background: #f3f4f6;
-            color: #1f2937;
-            border: 1px solid #e5e7eb;
+            background: #f3f4f6; color: #1f2937; border: 1px solid #e5e7eb;
         }
-        
-        .btn-default:hover {
-            background: #e5e7eb;
-        }
-        
-        .btn-primary {
-            background: #4b5563;
-            color: white;
-        }
-        
-        .btn-primary:hover {
-            background: #3f4554;
-        }
-        
-        .btn-success {
-            background: #10b981;
-            color: white;
-        }
-        
-        .btn-success:hover {
-            background: #059669;
-        }
-        
-        .btn-danger {
-            background: #ef4444;
-            color: white;
-        }
-        
-        .btn-danger:hover {
-            background: #dc2626;
-        }
-        
-        .table-wrapper {
-            overflow-x: auto;
-        }
-        
+        .btn-default:hover { background: #e5e7eb; }
+        .btn-success { background: #10b981; color: white; }
+        .btn-success:hover { background: #059669; }
+        .btn-danger { background: #ef4444; color: white; }
+        .btn-danger:hover { background: #dc2626; }
+        .table-wrapper { overflow-x: auto; }
         table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 13px;
+            width: 100%; border-collapse: collapse; font-size: 13px;
         }
-        
-        thead {
-            background: #f9fafb;
-            border-bottom: 1px solid #e5e7eb;
-        }
-        
+        thead { background: #f9fafb; border-bottom: 1px solid #e5e7eb; }
         th {
-            padding: 12px 16px;
-            text-align: left;
-            font-weight: 600;
-            color: #6b7280;
-            font-size: 12px;
-            text-transform: uppercase;
+            padding: 12px 16px; text-align: left; font-weight: 600;
+            color: #6b7280; font-size: 12px; text-transform: uppercase;
             letter-spacing: 0.5px;
         }
-        
-        td {
-            padding: 12px 16px;
-            border-bottom: 1px solid #f3f4f6;
-        }
-        
-        tbody tr:hover {
-            background: #fafafa;
-        }
-        
+        td { padding: 12px 16px; border-bottom: 1px solid #f3f4f6; }
+        tbody tr:hover { background: #fafafa; }
         .badge {
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 12px;
-            font-size: 11px;
-            font-weight: 600;
-            text-transform: uppercase;
+            display: inline-block; padding: 4px 12px; border-radius: 12px;
+            font-size: 11px; font-weight: 600; text-transform: uppercase;
             letter-spacing: 0.5px;
         }
-        
-        .badge-pending {
-            background: #fef3c7;
-            color: #92400e;
-        }
-        
-        .badge-completed {
-            background: #d1fae5;
-            color: #065f46;
-        }
-        
-        .badge-failed {
-            background: #fee2e2;
-            color: #991b1b;
-        }
-        
-        .actions {
-            display: flex;
-            gap: 4px;
-        }
-        
-        .actions button {
-            padding: 4px 8px;
-            font-size: 11px;
-        }
-        
+        .badge-pending { background: #fef3c7; color: #92400e; }
+        .badge-completed { background: #d1fae5; color: #065f46; }
+        .badge-failed { background: #fee2e2; color: #991b1b; }
+        .actions { display: flex; gap: 4px; }
+        .actions button { padding: 4px 8px; font-size: 11px; }
         .toast {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            padding: 12px 20px;
-            border-radius: 6px;
-            display: none;
-            font-size: 13px;
-            font-weight: 500;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-            z-index: 1000;
+            position: fixed; top: 20px; right: 20px; padding: 12px 20px;
+            border-radius: 6px; display: none; font-size: 13px; font-weight: 500;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 1000;
             animation: slideIn 0.3s ease;
         }
-        
         @keyframes slideIn {
             from { transform: translateX(400px); opacity: 0; }
             to { transform: translateX(0); opacity: 1; }
         }
-        
         .toast.show { display: block; }
         .toast.success { background: #10b981; color: white; }
         .toast.error { background: #ef4444; color: white; }
-        
-        .loading {
-            text-align: center;
-            padding: 40px;
-            color: #9ca3af;
-        }
-        
-        .empty {
-            text-align: center;
-            padding: 60px 20px;
-            color: #9ca3af;
-        }
-        
+        .loading { text-align: center; padding: 40px; color: #9ca3af; }
+        .empty { text-align: center; padding: 60px 20px; color: #9ca3af; }
         @media (max-width: 768px) {
-            .header {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-            
-            .stats {
-                grid-template-columns: 1fr 1fr;
-            }
-            
-            .card-header {
-                flex-direction: column;
-                align-items: stretch;
-            }
-            
-            .controls {
-                flex-direction: column;
-            }
-            
-            button {
-                width: 100%;
-                text-align: center;
-            }
+            .header { flex-direction: column; align-items: flex-start; }
+            .stats { grid-template-columns: 1fr 1fr; }
+            .card-header { flex-direction: column; align-items: stretch; }
+            .controls { flex-direction: column; }
+            button { width: 100%; text-align: center; }
         }
     </style>
 </head>
@@ -832,7 +655,7 @@ def dashboard():
             <div class="card-header">
                 <div class="card-title">Liste des donations</div>
                 <div class="controls">
-                    <button class="btn-default" onclick="loadData()">Rafraîchir</button>
+                    <button class="btn-default" onclick="loadData()">Rafraichir</button>
                     <button class="btn-success" onclick="markAllCompleted()">Tous completed</button>
                     <button class="btn-danger" onclick="deleteAllPending()">Supprimer pending</button>
                 </div>
@@ -862,113 +685,110 @@ def dashboard():
     <div class="toast" id="toast"></div>
     
     <script>
-        const API = window.location.origin;
-        const PASSWORD = new URLSearchParams(window.location.search).get('password');
+        var API = window.location.origin;
+        var PASSWORD = new URLSearchParams(window.location.search).get('password');
         
-        function showToast(msg, type = 'success') {
-            const t = document.getElementById('toast');
+        function showToast(msg, type) {
+            var t = document.getElementById('toast');
             t.textContent = msg;
-            t.className = 'toast show ' + type;
-            setTimeout(() => t.classList.remove('show'), 3000);
+            t.className = 'toast show ' + (type || 'success');
+            setTimeout(function() { t.classList.remove('show'); }, 3000);
         }
         
         function updateTime() {
-            document.getElementById('time').textContent = new Date().toLocaleTimeString('fr-FR');
+            var now = new Date();
+            document.getElementById('time').textContent = now.toLocaleTimeString('fr-FR');
         }
         setInterval(updateTime, 1000);
         updateTime();
         
         function loadStats() {
-            fetch(API + '/admin/stats?password=' + PASSWORD)
-                .then(r => r.json())
-                .then(d => {
-                    document.getElementById('statsContainer').innerHTML = 
-                        '<div class="stat total"><div class="stat-label">Total</div><div class="stat-value">' + d.total + '</div></div>' +
+            var url = API + '/admin/stats?password=' + PASSWORD;
+            fetch(url)
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    var html = '<div class="stat total"><div class="stat-label">Total</div><div class="stat-value">' + d.total + '</div></div>' +
                         '<div class="stat pending"><div class="stat-label">Pending</div><div class="stat-value">' + d.pending + '</div></div>' +
                         '<div class="stat completed"><div class="stat-label">Completed</div><div class="stat-value">' + d.completed + '</div></div>' +
                         '<div class="stat failed"><div class="stat-label">Failed</div><div class="stat-value">' + d.failed + '</div></div>';
-                });
+                    document.getElementById('statsContainer').innerHTML = html;
+                })
+                .catch(function(e) { console.error(e); });
         }
         
         function loadData() {
-            fetch(API + '/admin/donations?password=' + PASSWORD)
-                .then(r => r.json())
-                .then(d => {
-                    const tbody = document.getElementById('tableBody');
+            var url = API + '/admin/donations?password=' + PASSWORD;
+            fetch(url)
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    var tbody = document.getElementById('tableBody');
                     if (!d.donations || d.donations.length === 0) {
                         tbody.innerHTML = '<tr><td colspan="8" class="empty">Aucune donation</td></tr>';
                         return;
                     }
-                    let html = '';
-                    for (let x of d.donations) {
-                        html += '<tr>' +
-                            '<td>#' + x.id + '</td>' +
-                            '<td>' + (x.donor_name || x.player_id) + '</td>' +
-                            '<td>' + (x.target_name || x.target_player_id) + '</td>' +
-                            '<td>' + x.amount_robux + 'R$</td>' +
-                            '<td>' + x.final_amount + 'R$</td>' +
-                            '<td><span class="badge badge-' + x.status + '">' + x.status + '</span></td>' +
-                            '<td>' + new Date(x.created_at).toLocaleDateString('fr-FR') + '</td>' +
-                            '<td><div class="actions">' +
-                            '<button class="btn-success" onclick="setStatus(' + x.id + ', \'completed\')">✓</button>' +
-                            '<button class="btn-danger" onclick="del(' + x.id + ')">✕</button>' +
-                            '</div></td>' +
-                            '</tr>';
+                    var html = '';
+                    for (var i = 0; i < d.donations.length; i++) {
+                        var x = d.donations[i];
+                        var date = new Date(x.created_at).toLocaleDateString('fr-FR');
+                        html += '<tr><td>#' + x.id + '</td><td>' + (x.donor_name || x.player_id) + '</td><td>' + (x.target_name || x.target_player_id) + '</td><td>' + x.amount_robux + 'R$</td><td>' + x.final_amount + 'R$</td><td><span class="badge badge-' + x.status + '">' + x.status + '</span></td><td>' + date + '</td><td><div class="actions"><button class="btn-success" onclick="setStatus(' + x.id + ', \'completed\')">✓</button><button class="btn-danger" onclick="del(' + x.id + ')">✕</button></div></td></tr>';
                     }
                     tbody.innerHTML = html;
-                });
+                })
+                .catch(function(e) { console.error(e); });
         }
         
         function setStatus(id, s) {
-            fetch(API + '/admin/donations/' + id + '/status?password=' + PASSWORD, {
+            var url = API + '/admin/donations/' + id + '/status?password=' + PASSWORD;
+            var payload = JSON.stringify({status: s});
+            fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ status: s })
-            }).then(() => {
-                showToast('Donation #' + id + ' → ' + s);
+                headers: {'Content-Type': 'application/json'},
+                body: payload
+            }).then(function() {
+                showToast('Donation #' + id + ' updated');
                 loadData();
                 loadStats();
             });
         }
         
         function del(id) {
-            if (confirm('Supprimer #' + id + '?')) {
-                fetch(API + '/admin/donations/' + id + '?password=' + PASSWORD, { method: 'DELETE' })
-                    .then(() => {
-                        showToast('Donation #' + id + ' supprimée');
-                        loadData();
-                        loadStats();
-                    });
-            }
+            if (!confirm('Delete #' + id + '?')) return;
+            var url = API + '/admin/donations/' + id + '?password=' + PASSWORD;
+            fetch(url, {method: 'DELETE'})
+                .then(function() {
+                    showToast('Deleted');
+                    loadData();
+                    loadStats();
+                });
         }
         
         function deleteAllPending() {
-            if (confirm('Supprimer TOUTES les pending?')) {
-                fetch(API + '/admin/cleanup?password=' + PASSWORD, { method: 'POST' })
-                    .then(r => r.json())
-                    .then(d => {
-                        showToast(d.deleted + ' supprimées');
-                        loadData();
-                        loadStats();
-                    });
-            }
+            if (!confirm('Delete ALL pending?')) return;
+            var url = API + '/admin/cleanup?password=' + PASSWORD;
+            fetch(url, {method: 'POST'})
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    showToast(d.deleted + ' deleted');
+                    loadData();
+                    loadStats();
+                });
         }
         
         function markAllCompleted() {
-            if (confirm('Marquer tous les pending en completed?')) {
-                fetch(API + '/admin/mark-completed?password=' + PASSWORD, { method: 'POST' })
-                    .then(r => r.json())
-                    .then(d => {
-                        showToast(d.updated + ' marquées completed');
-                        loadData();
-                        loadStats();
-                    });
-            }
+            if (!confirm('Mark ALL pending as completed?')) return;
+            var url = API + '/admin/mark-completed?password=' + PASSWORD;
+            fetch(url, {method: 'POST'})
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    showToast(d.updated + ' marked');
+                    loadData();
+                    loadStats();
+                });
         }
         
         loadStats();
         loadData();
-        setInterval(() => { loadStats(); loadData(); }, 20000);
+        setInterval(function() { loadStats(); loadData(); }, 20000);
     </script>
 </body>
 </html>"""
