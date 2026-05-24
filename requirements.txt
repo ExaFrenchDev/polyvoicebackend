@@ -6,3 +6,4 @@ aiohttp==3.9.1
 gunicorn==21.2.0
 audioop-lts
 psycopg2-binary
+pyotp==2.9.0
