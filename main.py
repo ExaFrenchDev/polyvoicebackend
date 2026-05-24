@@ -265,12 +265,26 @@ class RobloxPayout:
                     logger.error(f"[Chef+2FA] Continue après 2FA échoué: {cont2.text if cont2 else 'None'}")
                     return False, "2FA continue failed"
 
-                logger.info("[Chef+2FA] Challenge complété, retry payout avec headers challenge...")
+                # ✅ FIX : lire la metadata mise à jour retournée par cont2
+                cont2_data = cont2.json()
+                logger.info(f"[Chef+2FA] cont2 response: {cont2_data}")
+                final_meta_raw = cont2_data.get("challengeMetadata", "")
+                final_type     = cont2_data.get("challengeType", "") or "chef"
+
+                if final_meta_raw:
+                    if isinstance(final_meta_raw, dict):
+                        final_meta_b64 = base64.b64encode(json.dumps(final_meta_raw).encode()).decode()
+                    else:
+                        final_meta_b64 = base64.b64encode(final_meta_raw.encode()).decode()
+                else:
+                    final_meta_b64 = challenge_meta_b64  # fallback
+
+                logger.info("[Chef+2FA] Challenge complété, retry payout avec headers mis à jour...")
                 time.sleep(1.5)  # anti-AutomatedTampering
                 final = self._payout_request(user_id, amount, {
                     "rblx-challenge-id":       challenge_id,
-                    "rblx-challenge-type":     "chef",
-                    "rblx-challenge-metadata": challenge_meta_b64,
+                    "rblx-challenge-type":     final_type,
+                    "rblx-challenge-metadata": final_meta_b64,
                 })
 
             elif next_type == "blocksession":
@@ -315,12 +329,26 @@ class RobloxPayout:
                 logger.error(f"[2FA] Continue après 2FA échoué: {cont2.text if cont2 else 'None'}")
                 return False, "2FA continue failed"
 
-            logger.info("[2FA] Challenge complété, retry payout avec headers challenge...")
+            # ✅ FIX : lire la metadata mise à jour retournée par cont2
+            cont2_data = cont2.json()
+            logger.info(f"[2FA] cont2 response: {cont2_data}")
+            final_meta_raw = cont2_data.get("challengeMetadata", "")
+            final_type     = cont2_data.get("challengeType", "") or "twostepverification"
+
+            if final_meta_raw:
+                if isinstance(final_meta_raw, dict):
+                    final_meta_b64 = base64.b64encode(json.dumps(final_meta_raw).encode()).decode()
+                else:
+                    final_meta_b64 = base64.b64encode(final_meta_raw.encode()).decode()
+            else:
+                final_meta_b64 = challenge_meta_b64  # fallback
+
+            logger.info("[2FA] Challenge complété, retry payout avec headers mis à jour...")
             time.sleep(1.5)  # anti-AutomatedTampering
             final = self._payout_request(user_id, amount, {
                 "rblx-challenge-id":       challenge_id,
-                "rblx-challenge-type":     "twostepverification",
-                "rblx-challenge-metadata": challenge_meta_b64,
+                "rblx-challenge-type":     final_type,
+                "rblx-challenge-metadata": final_meta_b64,
             })
 
             if final.status_code == 200:
