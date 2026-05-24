@@ -527,10 +527,10 @@ def index():
 
 @app.route('/admin', methods=['GET'])
 def dashboard():
-    """Dashboard clean et modern avec design neutre"""
+    """Dashboard clean"""
     password = request.args.get('password', '')
     if password != ADMIN_PASSWORD:
-        return "Accès refusé", 403
+        return "Access denied", 403
     
     html = """<!DOCTYPE html>
 <html lang="fr">
@@ -541,7 +541,7 @@ def dashboard():
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif;
             background: #f5f5f5;
             color: #1f2937;
         }
@@ -631,13 +631,6 @@ def dashboard():
         .toast.error { background: #ef4444; color: white; }
         .loading { text-align: center; padding: 40px; color: #9ca3af; }
         .empty { text-align: center; padding: 60px 20px; color: #9ca3af; }
-        @media (max-width: 768px) {
-            .header { flex-direction: column; align-items: flex-start; }
-            .stats { grid-template-columns: 1fr 1fr; }
-            .card-header { flex-direction: column; align-items: stretch; }
-            .controls { flex-direction: column; }
-            button { width: 100%; text-align: center; }
-        }
     </style>
 </head>
 <body>
@@ -655,9 +648,9 @@ def dashboard():
             <div class="card-header">
                 <div class="card-title">Liste des donations</div>
                 <div class="controls">
-                    <button class="btn-default" onclick="loadData()">Rafraichir</button>
-                    <button class="btn-success" onclick="markAllCompleted()">Tous completed</button>
-                    <button class="btn-danger" onclick="deleteAllPending()">Supprimer pending</button>
+                    <button class="btn-default" onclick="window.loadData()">Rafraichir</button>
+                    <button class="btn-success" onclick="window.markAllCompleted()">Tous completed</button>
+                    <button class="btn-danger" onclick="window.deleteAllPending()">Supprimer pending</button>
                 </div>
             </div>
             <div class="table-wrapper">
@@ -685,110 +678,111 @@ def dashboard():
     <div class="toast" id="toast"></div>
     
     <script>
+    (function() {
         var API = window.location.origin;
-        var PASSWORD = new URLSearchParams(window.location.search).get('password');
+        var PASSWORD = new URLSearchParams(window.location.search).get("password");
         
         function showToast(msg, type) {
-            var t = document.getElementById('toast');
+            var t = document.getElementById("toast");
             t.textContent = msg;
-            t.className = 'toast show ' + (type || 'success');
-            setTimeout(function() { t.classList.remove('show'); }, 3000);
+            t.className = "toast show " + (type || "success");
+            setTimeout(function() { t.classList.remove("show"); }, 3000);
         }
         
         function updateTime() {
             var now = new Date();
-            document.getElementById('time').textContent = now.toLocaleTimeString('fr-FR');
+            document.getElementById("time").textContent = now.toLocaleTimeString("fr-FR");
         }
         setInterval(updateTime, 1000);
         updateTime();
         
-        function loadStats() {
-            var url = API + '/admin/stats?password=' + PASSWORD;
+        window.loadStats = function() {
+            var url = API + "/admin/stats?password=" + PASSWORD;
             fetch(url)
                 .then(function(r) { return r.json(); })
                 .then(function(d) {
-                    var html = '<div class="stat total"><div class="stat-label">Total</div><div class="stat-value">' + d.total + '</div></div>' +
-                        '<div class="stat pending"><div class="stat-label">Pending</div><div class="stat-value">' + d.pending + '</div></div>' +
-                        '<div class="stat completed"><div class="stat-label">Completed</div><div class="stat-value">' + d.completed + '</div></div>' +
-                        '<div class="stat failed"><div class="stat-label">Failed</div><div class="stat-value">' + d.failed + '</div></div>';
-                    document.getElementById('statsContainer').innerHTML = html;
+                    var html = "<div class='stat total'><div class='stat-label'>Total</div><div class='stat-value'>" + d.total + "</div></div>" +
+                        "<div class='stat pending'><div class='stat-label'>Pending</div><div class='stat-value'>" + d.pending + "</div></div>" +
+                        "<div class='stat completed'><div class='stat-label'>Completed</div><div class='stat-value'>" + d.completed + "</div></div>" +
+                        "<div class='stat failed'><div class='stat-label'>Failed</div><div class='stat-value'>" + d.failed + "</div></div>";
+                    document.getElementById("statsContainer").innerHTML = html;
                 })
                 .catch(function(e) { console.error(e); });
-        }
+        };
         
-        function loadData() {
-            var url = API + '/admin/donations?password=' + PASSWORD;
+        window.loadData = function() {
+            var url = API + "/admin/donations?password=" + PASSWORD;
             fetch(url)
                 .then(function(r) { return r.json(); })
                 .then(function(d) {
-                    var tbody = document.getElementById('tableBody');
+                    var tbody = document.getElementById("tableBody");
                     if (!d.donations || d.donations.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="8" class="empty">Aucune donation</td></tr>';
+                        tbody.innerHTML = "<tr><td colspan='8' class='empty'>Aucune donation</td></tr>";
                         return;
                     }
-                    var html = '';
+                    var html = "";
                     for (var i = 0; i < d.donations.length; i++) {
                         var x = d.donations[i];
-                        var date = new Date(x.created_at).toLocaleDateString('fr-FR');
-                        html += '<tr><td>#' + x.id + '</td><td>' + (x.donor_name || x.player_id) + '</td><td>' + (x.target_name || x.target_player_id) + '</td><td>' + x.amount_robux + 'R$</td><td>' + x.final_amount + 'R$</td><td><span class="badge badge-' + x.status + '">' + x.status + '</span></td><td>' + date + '</td><td><div class="actions"><button class="btn-success" onclick="setStatus(' + x.id + ', \'completed\')">✓</button><button class="btn-danger" onclick="del(' + x.id + ')">✕</button></div></td></tr>';
+                        var date = new Date(x.created_at).toLocaleDateString("fr-FR");
+                        html += "<tr><td>#" + x.id + "</td><td>" + (x.donor_name || x.player_id) + "</td><td>" + (x.target_name || x.target_player_id) + "</td><td>" + x.amount_robux + "R$</td><td>" + x.final_amount + "R$</td><td><span class=\"badge badge-" + x.status + "\">" + x.status + "</span></td><td>" + date + "</td><td><div class=\"actions\"><button class=\"btn-success\" onclick=\"window.setStatus(" + x.id + ", " + JSON.stringify("completed") + ")\">✓</button><button class=\"btn-danger\" onclick=\"window.del(" + x.id + ")\">✕</button></div></td></tr>";
                     }
                     tbody.innerHTML = html;
                 })
                 .catch(function(e) { console.error(e); });
-        }
+        };
         
-        function setStatus(id, s) {
-            var url = API + '/admin/donations/' + id + '/status?password=' + PASSWORD;
-            var payload = JSON.stringify({status: s});
+        window.setStatus = function(id, s) {
+            var url = API + "/admin/donations/" + id + "/status?password=" + PASSWORD;
             fetch(url, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: payload
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({status: s})
             }).then(function() {
-                showToast('Donation #' + id + ' updated');
-                loadData();
-                loadStats();
+                showToast("Donation #" + id + " updated");
+                window.loadData();
+                window.loadStats();
             });
-        }
+        };
         
-        function del(id) {
-            if (!confirm('Delete #' + id + '?')) return;
-            var url = API + '/admin/donations/' + id + '?password=' + PASSWORD;
-            fetch(url, {method: 'DELETE'})
+        window.del = function(id) {
+            if (!confirm("Delete #" + id + "?")) return;
+            var url = API + "/admin/donations/" + id + "?password=" + PASSWORD;
+            fetch(url, {method: "DELETE"})
                 .then(function() {
-                    showToast('Deleted');
-                    loadData();
-                    loadStats();
+                    showToast("Deleted");
+                    window.loadData();
+                    window.loadStats();
                 });
-        }
+        };
         
-        function deleteAllPending() {
-            if (!confirm('Delete ALL pending?')) return;
-            var url = API + '/admin/cleanup?password=' + PASSWORD;
-            fetch(url, {method: 'POST'})
+        window.deleteAllPending = function() {
+            if (!confirm("Delete ALL pending?")) return;
+            var url = API + "/admin/cleanup?password=" + PASSWORD;
+            fetch(url, {method: "POST"})
                 .then(function(r) { return r.json(); })
                 .then(function(d) {
-                    showToast(d.deleted + ' deleted');
-                    loadData();
-                    loadStats();
+                    showToast(d.deleted + " deleted");
+                    window.loadData();
+                    window.loadStats();
                 });
-        }
+        };
         
-        function markAllCompleted() {
-            if (!confirm('Mark ALL pending as completed?')) return;
-            var url = API + '/admin/mark-completed?password=' + PASSWORD;
-            fetch(url, {method: 'POST'})
+        window.markAllCompleted = function() {
+            if (!confirm("Mark ALL pending as completed?")) return;
+            var url = API + "/admin/mark-completed?password=" + PASSWORD;
+            fetch(url, {method: "POST"})
                 .then(function(r) { return r.json(); })
                 .then(function(d) {
-                    showToast(d.updated + ' marked');
-                    loadData();
-                    loadStats();
+                    showToast(d.updated + " marked");
+                    window.loadData();
+                    window.loadStats();
                 });
-        }
+        };
         
-        loadStats();
-        loadData();
-        setInterval(function() { loadStats(); loadData(); }, 20000);
+        window.loadStats();
+        window.loadData();
+        setInterval(function() { window.loadStats(); window.loadData(); }, 20000);
+    })();
     </script>
 </body>
 </html>"""
