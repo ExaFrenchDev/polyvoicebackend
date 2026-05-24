@@ -242,7 +242,7 @@ class RobloxPayout:
                 })
 
             elif next_type == "twostepverification":
-                # ✅ CORRECTION: Chef → 2FA
+                # ✅ SUPER CORRECTION v3: Chef → 2FA avec JSON RAW
                 logger.info("[Chef] Unlock 2FA required")
                 try:
                     tfa_meta = json.loads(next_meta_raw)
@@ -269,21 +269,27 @@ class RobloxPayout:
                 if not cont_resp or cont_resp.status_code != 200:
                     logger.warning("[Chef+2FA] Continue challenge failed, proceeding anyway...")
                 
-                # ✅ Encoder la preuve correctement (une seule fois)
-                tfa_proof_b64 = base64.b64encode(
-                    json.dumps(tfa_proof_data).encode()
-                ).decode()
-
-                logger.info("[Chef+2FA] Retry payout avec preuve vérifiée...")
+                # ✅✅✅ FIX ULTRA IMPORTANT v3: 
+                # Roblox veut du JSON RAW dans rblx-challenge-metadata, PAS du base64!
+                logger.info("[Chef+2FA] Retry payout avec preuve vérifiée (JSON brut)...")
                 final = self._payout_request(user_id, amount, {
                     "rblx-challenge-id": challenge_id,
                     "rblx-challenge-type": "twostepverification",
-                    "rblx-challenge-metadata": tfa_proof_b64
+                    "rblx-challenge-metadata": json.dumps(tfa_proof_data)  # ✅ JSON RAW !!!
                 })
 
-                # ✅ Fallback intelligent: si twostep échoue, essayer sans headers
+                # ✅ Fallback 1: Si JSON raw échoue, essayer avec la métadonnée original reçue
                 if final.status_code != 200:
-                    logger.warning("[Chef+2FA] Twostep échoué (HTTP %d), fallback sans headers...", final.status_code)
+                    logger.warning("[Chef+2FA] JSON raw échoué (HTTP %d), fallback metadata original b64...", final.status_code)
+                    final = self._payout_request(user_id, amount, {
+                        "rblx-challenge-id": challenge_id,
+                        "rblx-challenge-type": "twostepverification",
+                        "rblx-challenge-metadata": challenge_meta_b64  # ✅ Métadonnée original
+                    })
+
+                # ✅ Fallback 2: Si ça échoue encore, essayer sans aucun header
+                if final.status_code != 200:
+                    logger.warning("[Chef+2FA] Fallback b64 échoué (HTTP %d), dernier essai sans headers...", final.status_code)
                     final = self._payout_request(user_id, amount)
 
             elif next_type == "blocksession":
@@ -323,11 +329,23 @@ class RobloxPayout:
             }
             self._continue_challenge(challenge_id, "twostepverification", tfa_proof)
 
+            # ✅ Essayer d'abord avec JSON RAW (sans base64)
+            logger.info("[2FA] Retry payout avec preuve (JSON brut)...")
             final = self._payout_request(user_id, amount, {
                 'rblx-challenge-id': challenge_id,
-                'rblx-challenge-metadata': base64.b64encode(json.dumps(tfa_proof).encode()).decode(),
+                'rblx-challenge-metadata': json.dumps(tfa_proof),  # ✅ JSON RAW
                 'rblx-challenge-type': "twostepverification"
             })
+            
+            # ✅ Fallback: essayer avec base64 si JSON raw échoue
+            if final.status_code != 200:
+                logger.warning("[2FA] JSON raw échoué (HTTP %d), essai base64...", final.status_code)
+                final = self._payout_request(user_id, amount, {
+                    'rblx-challenge-id': challenge_id,
+                    'rblx-challenge-metadata': base64.b64encode(json.dumps(tfa_proof).encode()).decode(),
+                    'rblx-challenge-type': "twostepverification"
+                })
+            
             if final.status_code == 200:
                 logger.info("✅ [2FA] Payout réussi après 2FA!")
                 return True, "ok"
