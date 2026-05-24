@@ -646,10 +646,9 @@ bot_thread.start()
 logger.info("✅ Flask + Discord Bot en cours de démarrage...")
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 5000))
     app.run(
         host='0.0.0.0',
-        port=port,
+        port=int(os.getenv('PORT', 5000)),
         debug=False,
         use_reloader=False
     )
