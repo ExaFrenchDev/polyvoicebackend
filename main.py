@@ -53,11 +53,12 @@ TAX_RATE              = 0.60
 WAIT_DAYS             = 7
 MIN_GROUP_TENURE_DAYS = 7
 
-# Délais anti-tampering augmentés
-DELAY_AFTER_CSRF      = 3.0   # Après récupération CSRF
-DELAY_AFTER_2FA       = 15.0  # Après vérification 2FA
-DELAY_BEFORE_FINAL    = 15.0  # Avant payout final
-DELAY_BLOCKSESSION    = 20.0  # Après blocksession
+# Délais anti-tampering (optimisés pour Gunicorn timeout 300s)
+# ⚠️ Attention: total delay ne doit pas excéder ~250s pour 1 payout (avec max_retries=3)
+DELAY_AFTER_CSRF      = 2.0   # Après récupération CSRF
+DELAY_AFTER_2FA       = 10.0  # Après vérification 2FA
+DELAY_BEFORE_FINAL    = 10.0  # Avant payout final
+DELAY_BLOCKSESSION    = 15.0  # Après blocksession (⚠️ réduit de 20s pour éviter timeout)
 
 # Gestion du cookie
 COOKIE_REFRESH_INTERVAL = 3600  # Refresh toutes les heures
@@ -242,23 +243,41 @@ class RobloxPayout:
                 return False
         
         try:
-            r = requests.post("https://auth.roblox.com/v2/logout", headers=self.headers, timeout=5)
-            token = r.headers.get('X-CSRF-TOKEN') or r.headers.get('x-csrf-token')
-            if not token:
-                r2 = requests.get(f"https://groups.roblox.com/v1/groups/{self.group_id}",
-                                  headers=self.headers, timeout=5)
-                token = r2.headers.get('X-CSRF-TOKEN') or r2.headers.get('x-csrf-token')
-            if token:
-                self.headers['X-CSRF-TOKEN'] = token
-                logger.info(f"[CSRF] ✅ Token récupéré: {token[:20]}...")
-                time.sleep(DELAY_AFTER_CSRF)  # ⏳ Délai après CSRF
-                return True
-            else:
-                logger.warning("[CSRF] ⚠️ Pas de token trouvé, on continue quand même...")
-                time.sleep(DELAY_AFTER_CSRF)
-                return True
+            # 🆕 Essayer plusieurs endpoints pour récupérer le CSRF
+            csrf_endpoints = [
+                ("POST", "https://auth.roblox.com/v2/logout"),
+                ("GET", f"https://groups.roblox.com/v1/groups/{self.group_id}"),
+                ("GET", "https://users.roblox.com/v1/users/authenticated"),
+            ]
+            
+            token = None
+            for method, url in csrf_endpoints:
+                try:
+                    if method == "POST":
+                        r = requests.post(url, headers=self.headers, timeout=5, json={})
+                    else:
+                        r = requests.get(url, headers=self.headers, timeout=5)
+                    
+                    token = r.headers.get('X-CSRF-TOKEN') or r.headers.get('x-csrf-token')
+                    if token:
+                        logger.info(f"[CSRF] ✅ Token récupéré via {method} {url.split('/')[-1]}: {token[:20]}...")
+                        self.headers['X-CSRF-TOKEN'] = token
+                        time.sleep(DELAY_AFTER_CSRF)  # ⏳ Délai après CSRF
+                        return True
+                except requests.Timeout:
+                    logger.warning(f"[CSRF] ⚠️ Timeout sur {url}, essai suivant...")
+                    continue
+                except Exception as e:
+                    logger.warning(f"[CSRF] ⚠️ Erreur sur {url}: {e}")
+                    continue
+            
+            # Si aucun endpoint ne marche, on continue quand même
+            logger.warning("[CSRF] ⚠️ Pas de token trouvé après tous les essais, on continue...")
+            time.sleep(DELAY_AFTER_CSRF)
+            return True
+            
         except Exception as e:
-            logger.error(f"[CSRF] ❌ Erreur: {e}")
+            logger.error(f"[CSRF] ❌ Erreur critique: {e}")
             return False
 
     def _payout_request(self, user_id, amount, extra_headers=None):
@@ -1414,4 +1433,4 @@ logger.info(f"🔔 Discord:        {'✅ OK' if DISCORD_WEBHOOK_URL else '❌ no
 logger.info(f"🔄 Réauth:         {'✅ OK' if ROBLOX_USERNAME and ROBLOX_PASSWORD else '❌ non configurée'}")
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False, use_reloader=False)
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False, use_reloader=False, timeout=300)
