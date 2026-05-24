@@ -527,110 +527,59 @@ def index():
 
 @app.route('/admin', methods=['GET'])
 def dashboard():
-    """Dashboard clean"""
     password = request.args.get('password', '')
     if password != ADMIN_PASSWORD:
         return "Access denied", 403
     
     html = """<!DOCTYPE html>
-<html lang="fr">
+<html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin Donations</title>
+    <title>Admin</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif;
-            background: #f5f5f5;
-            color: #1f2937;
-        }
+        body { font-family: sans-serif; background: #f5f5f5; color: #333; }
         .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
-        .header {
-            background: white; padding: 24px; border-radius: 8px;
-            margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            display: flex; justify-content: space-between; align-items: center;
-        }
+        .header { background: white; padding: 20px; margin-bottom: 20px; border-radius: 6px; display: flex; justify-content: space-between; }
         .header h1 { font-size: 24px; font-weight: 600; }
-        .time { font-size: 14px; color: #6b7280; font-weight: 500; }
-        .stats {
-            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px; margin-bottom: 24px;
-        }
-        .stat {
-            background: white; padding: 20px; border-radius: 8px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 4px solid #e5e7eb;
-        }
-        .stat.total { border-left-color: #6b7280; }
+        .time { color: #666; }
+        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
+        .stat { background: white; padding: 20px; border-radius: 6px; border-left: 4px solid #ccc; }
+        .stat.total { border-left-color: #666; }
         .stat.pending { border-left-color: #f59e0b; }
         .stat.completed { border-left-color: #10b981; }
         .stat.failed { border-left-color: #ef4444; }
-        .stat-label {
-            font-size: 12px; color: #6b7280; text-transform: uppercase;
-            letter-spacing: 0.5px; margin-bottom: 8px; font-weight: 600;
-        }
-        .stat-value { font-size: 32px; font-weight: 700; color: #1f2937; }
-        .card {
-            background: white; border-radius: 8px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow: hidden;
-        }
-        .card-header {
-            padding: 20px 24px; border-bottom: 1px solid #e5e7eb;
-            display: flex; justify-content: space-between; align-items: center;
-            flex-wrap: wrap; gap: 16px;
-        }
+        .stat-label { font-size: 12px; color: #666; text-transform: uppercase; margin-bottom: 8px; }
+        .stat-value { font-size: 32px; font-weight: 700; }
+        .card { background: white; border-radius: 6px; overflow: hidden; }
+        .card-header { padding: 20px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
         .card-title { font-size: 16px; font-weight: 600; }
-        .controls { display: flex; gap: 8px; flex-wrap: wrap; }
-        button {
-            padding: 8px 16px; border: none; border-radius: 6px;
-            font-size: 13px; font-weight: 500; cursor: pointer;
-            transition: all 0.2s ease; white-space: nowrap;
-        }
-        .btn-default {
-            background: #f3f4f6; color: #1f2937; border: 1px solid #e5e7eb;
-        }
+        .controls { display: flex; gap: 8px; }
+        button { padding: 8px 16px; border: none; border-radius: 4px; font-size: 13px; font-weight: 500; cursor: pointer; }
+        .btn-default { background: #f3f4f6; color: #333; border: 1px solid #e5e7eb; }
         .btn-default:hover { background: #e5e7eb; }
         .btn-success { background: #10b981; color: white; }
         .btn-success:hover { background: #059669; }
         .btn-danger { background: #ef4444; color: white; }
         .btn-danger:hover { background: #dc2626; }
         .table-wrapper { overflow-x: auto; }
-        table {
-            width: 100%; border-collapse: collapse; font-size: 13px;
-        }
-        thead { background: #f9fafb; border-bottom: 1px solid #e5e7eb; }
-        th {
-            padding: 12px 16px; text-align: left; font-weight: 600;
-            color: #6b7280; font-size: 12px; text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
+        table { width: 100%; border-collapse: collapse; }
+        thead { background: #f9fafb; }
+        th { padding: 12px 16px; text-align: left; font-weight: 600; color: #666; font-size: 12px; text-transform: uppercase; border-bottom: 1px solid #eee; }
         td { padding: 12px 16px; border-bottom: 1px solid #f3f4f6; }
         tbody tr:hover { background: #fafafa; }
-        .badge {
-            display: inline-block; padding: 4px 12px; border-radius: 12px;
-            font-size: 11px; font-weight: 600; text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
+        .badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 11px; font-weight: 600; }
         .badge-pending { background: #fef3c7; color: #92400e; }
         .badge-completed { background: #d1fae5; color: #065f46; }
         .badge-failed { background: #fee2e2; color: #991b1b; }
         .actions { display: flex; gap: 4px; }
         .actions button { padding: 4px 8px; font-size: 11px; }
-        .toast {
-            position: fixed; top: 20px; right: 20px; padding: 12px 20px;
-            border-radius: 6px; display: none; font-size: 13px; font-weight: 500;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 1000;
-            animation: slideIn 0.3s ease;
-        }
-        @keyframes slideIn {
-            from { transform: translateX(400px); opacity: 0; }
-            to { transform: translateX(0); opacity: 1; }
-        }
+        .toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 4px; display: none; font-size: 13px; z-index: 1000; }
         .toast.show { display: block; }
         .toast.success { background: #10b981; color: white; }
-        .toast.error { background: #ef4444; color: white; }
-        .loading { text-align: center; padding: 40px; color: #9ca3af; }
-        .empty { text-align: center; padding: 60px 20px; color: #9ca3af; }
+        .loading { text-align: center; padding: 40px; color: #999; }
+        .empty { text-align: center; padding: 60px 20px; color: #999; }
     </style>
 </head>
 <body>
@@ -641,16 +590,16 @@ def dashboard():
         </div>
         
         <div class="stats" id="statsContainer">
-            <div class="loading">Chargement...</div>
+            <div class="loading">Loading...</div>
         </div>
         
         <div class="card">
             <div class="card-header">
-                <div class="card-title">Liste des donations</div>
+                <div class="card-title">Donations</div>
                 <div class="controls">
-                    <button class="btn-default" onclick="window.loadData()">Rafraichir</button>
-                    <button class="btn-success" onclick="window.markAllCompleted()">Tous completed</button>
-                    <button class="btn-danger" onclick="window.deleteAllPending()">Supprimer pending</button>
+                    <button class="btn-default" id="refreshBtn">Refresh</button>
+                    <button class="btn-success" id="completedBtn">All completed</button>
+                    <button class="btn-danger" id="deleteBtn">Delete pending</button>
                 </div>
             </div>
             <div class="table-wrapper">
@@ -658,17 +607,17 @@ def dashboard():
                     <thead>
                         <tr>
                             <th>ID</th>
-                            <th>Donateur</th>
-                            <th>Receveur</th>
-                            <th>Montant</th>
+                            <th>Donor</th>
+                            <th>Receiver</th>
+                            <th>Amount</th>
                             <th>Net</th>
-                            <th>Statut</th>
+                            <th>Status</th>
                             <th>Date</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody id="tableBody">
-                        <tr><td colspan="8" class="loading">Chargement...</td></tr>
+                        <tr><td colspan="8" class="loading">Loading...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -678,111 +627,126 @@ def dashboard():
     <div class="toast" id="toast"></div>
     
     <script>
-    (function() {
-        var API = window.location.origin;
-        var PASSWORD = new URLSearchParams(window.location.search).get("password");
-        
-        function showToast(msg, type) {
-            var t = document.getElementById("toast");
-            t.textContent = msg;
-            t.className = "toast show " + (type || "success");
-            setTimeout(function() { t.classList.remove("show"); }, 3000);
-        }
-        
-        function updateTime() {
-            var now = new Date();
-            document.getElementById("time").textContent = now.toLocaleTimeString("fr-FR");
-        }
-        setInterval(updateTime, 1000);
-        updateTime();
-        
-        window.loadStats = function() {
-            var url = API + "/admin/stats?password=" + PASSWORD;
-            fetch(url)
-                .then(function(r) { return r.json(); })
-                .then(function(d) {
-                    var html = "<div class='stat total'><div class='stat-label'>Total</div><div class='stat-value'>" + d.total + "</div></div>" +
-                        "<div class='stat pending'><div class='stat-label'>Pending</div><div class='stat-value'>" + d.pending + "</div></div>" +
-                        "<div class='stat completed'><div class='stat-label'>Completed</div><div class='stat-value'>" + d.completed + "</div></div>" +
-                        "<div class='stat failed'><div class='stat-label'>Failed</div><div class='stat-value'>" + d.failed + "</div></div>";
-                    document.getElementById("statsContainer").innerHTML = html;
-                })
-                .catch(function(e) { console.error(e); });
-        };
-        
-        window.loadData = function() {
-            var url = API + "/admin/donations?password=" + PASSWORD;
-            fetch(url)
-                .then(function(r) { return r.json(); })
-                .then(function(d) {
-                    var tbody = document.getElementById("tableBody");
-                    if (!d.donations || d.donations.length === 0) {
-                        tbody.innerHTML = "<tr><td colspan='8' class='empty'>Aucune donation</td></tr>";
-                        return;
-                    }
-                    var html = "";
-                    for (var i = 0; i < d.donations.length; i++) {
-                        var x = d.donations[i];
-                        var date = new Date(x.created_at).toLocaleDateString("fr-FR");
-                        html += "<tr><td>#" + x.id + "</td><td>" + (x.donor_name || x.player_id) + "</td><td>" + (x.target_name || x.target_player_id) + "</td><td>" + x.amount_robux + "R$</td><td>" + x.final_amount + "R$</td><td><span class=\"badge badge-" + x.status + "\">" + x.status + "</span></td><td>" + date + "</td><td><div class=\"actions\"><button class=\"btn-success\" onclick=\"window.setStatus(" + x.id + ", " + JSON.stringify("completed") + ")\">✓</button><button class=\"btn-danger\" onclick=\"window.del(" + x.id + ")\">✕</button></div></td></tr>";
-                    }
-                    tbody.innerHTML = html;
-                })
-                .catch(function(e) { console.error(e); });
-        };
-        
-        window.setStatus = function(id, s) {
-            var url = API + "/admin/donations/" + id + "/status?password=" + PASSWORD;
-            fetch(url, {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({status: s})
-            }).then(function() {
-                showToast("Donation #" + id + " updated");
-                window.loadData();
-                window.loadStats();
+    var API = window.location.origin;
+    var PASSWORD = new URLSearchParams(window.location.search).get("password");
+    
+    function showToast(msg) {
+        var t = document.getElementById("toast");
+        t.textContent = msg;
+        t.className = "toast show success";
+        setTimeout(function() { t.classList.remove("show"); }, 3000);
+    }
+    
+    function updateTime() {
+        var now = new Date();
+        document.getElementById("time").textContent = now.toLocaleTimeString("fr-FR");
+    }
+    setInterval(updateTime, 1000);
+    updateTime();
+    
+    function loadStats() {
+        fetch(API + "/admin/stats?password=" + PASSWORD)
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var html = "";
+                html += "<div class='stat total'><div class='stat-label'>Total</div><div class='stat-value'>" + d.total + "</div></div>";
+                html += "<div class='stat pending'><div class='stat-label'>Pending</div><div class='stat-value'>" + d.pending + "</div></div>";
+                html += "<div class='stat completed'><div class='stat-label'>Completed</div><div class='stat-value'>" + d.completed + "</div></div>";
+                html += "<div class='stat failed'><div class='stat-label'>Failed</div><div class='stat-value'>" + d.failed + "</div></div>";
+                document.getElementById("statsContainer").innerHTML = html;
             });
-        };
-        
-        window.del = function(id) {
-            if (!confirm("Delete #" + id + "?")) return;
-            var url = API + "/admin/donations/" + id + "?password=" + PASSWORD;
-            fetch(url, {method: "DELETE"})
-                .then(function() {
-                    showToast("Deleted");
-                    window.loadData();
-                    window.loadStats();
-                });
-        };
-        
-        window.deleteAllPending = function() {
-            if (!confirm("Delete ALL pending?")) return;
-            var url = API + "/admin/cleanup?password=" + PASSWORD;
-            fetch(url, {method: "POST"})
-                .then(function(r) { return r.json(); })
-                .then(function(d) {
-                    showToast(d.deleted + " deleted");
-                    window.loadData();
-                    window.loadStats();
-                });
-        };
-        
-        window.markAllCompleted = function() {
-            if (!confirm("Mark ALL pending as completed?")) return;
-            var url = API + "/admin/mark-completed?password=" + PASSWORD;
-            fetch(url, {method: "POST"})
-                .then(function(r) { return r.json(); })
-                .then(function(d) {
-                    showToast(d.updated + " marked");
-                    window.loadData();
-                    window.loadStats();
-                });
-        };
-        
-        window.loadStats();
-        window.loadData();
-        setInterval(function() { window.loadStats(); window.loadData(); }, 20000);
-    })();
+    }
+    
+    function loadData() {
+        fetch(API + "/admin/donations?password=" + PASSWORD)
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var tbody = document.getElementById("tableBody");
+                if (!d.donations || d.donations.length === 0) {
+                    tbody.innerHTML = "<tr><td colspan='8' class='empty'>No donations</td></tr>";
+                    return;
+                }
+                var html = "";
+                for (var i = 0; i < d.donations.length; i++) {
+                    var x = d.donations[i];
+                    var date = new Date(x.created_at).toLocaleDateString("fr-FR");
+                    var donorName = x.donor_name || x.player_id;
+                    var receiverName = x.target_name || x.target_player_id;
+                    html += "<tr>";
+                    html += "<td>#" + x.id + "</td>";
+                    html += "<td>" + donorName + "</td>";
+                    html += "<td>" + receiverName + "</td>";
+                    html += "<td>" + x.amount_robux + "R$</td>";
+                    html += "<td>" + x.final_amount + "R$</td>";
+                    html += "<td><span class='badge badge-" + x.status + "'>" + x.status + "</span></td>";
+                    html += "<td>" + date + "</td>";
+                    html += "<td><div class='actions'>";
+                    html += "<button class='btn-success' data-id='" + x.id + "' onclick='setStatus(this)'>OK</button>";
+                    html += "<button class='btn-danger' data-id='" + x.id + "' onclick='delDonation(this)'>DEL</button>";
+                    html += "</div></td>";
+                    html += "</tr>";
+                }
+                tbody.innerHTML = html;
+            });
+    }
+    
+    function setStatus(btn) {
+        var id = btn.getAttribute("data-id");
+        var url = API + "/admin/donations/" + id + "/status?password=" + PASSWORD;
+        fetch(url, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: "{\"status\":\"completed\"}"
+        }).then(function() {
+            showToast("Updated");
+            loadData();
+            loadStats();
+        });
+    }
+    
+    function delDonation(btn) {
+        var id = btn.getAttribute("data-id");
+        if (!confirm("Delete " + id + "?")) return;
+        var url = API + "/admin/donations/" + id + "?password=" + PASSWORD;
+        fetch(url, {method: "DELETE"})
+            .then(function() {
+                showToast("Deleted");
+                loadData();
+                loadStats();
+            });
+    }
+    
+    function deleteAllPending() {
+        if (!confirm("Delete ALL pending?")) return;
+        var url = API + "/admin/cleanup?password=" + PASSWORD;
+        fetch(url, {method: "POST"})
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                showToast(d.deleted + " deleted");
+                loadData();
+                loadStats();
+            });
+    }
+    
+    function markAllCompleted() {
+        if (!confirm("Mark ALL as completed?")) return;
+        var url = API + "/admin/mark-completed?password=" + PASSWORD;
+        fetch(url, {method: "POST"})
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                showToast(d.updated + " marked");
+                loadData();
+                loadStats();
+            });
+    }
+    
+    document.getElementById("refreshBtn").onclick = loadData;
+    document.getElementById("completedBtn").onclick = markAllCompleted;
+    document.getElementById("deleteBtn").onclick = deleteAllPending;
+    
+    loadStats();
+    loadData();
+    setInterval(function() { loadStats(); loadData(); }, 20000);
     </script>
 </body>
 </html>"""
