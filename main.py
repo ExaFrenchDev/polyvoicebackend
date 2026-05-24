@@ -615,24 +615,25 @@ def index():
 # STARTUP
 # ============================================================================
 
+init_db()
+
+async def bot_startup():
+    await setup_bot()
+    await bot.start(DISCORD_TOKEN)
+
+def run_bot():
+    asyncio.new_event_loop().run_until_complete(bot_startup())
+
+bot_thread = threading.Thread(target=run_bot, daemon=True)
+bot_thread.start()
+
+logger.info("✅ Flask + Discord Bot en cours de démarrage...")
+
 if __name__ == '__main__':
-    init_db()
-    
-    async def bot_startup():
-        await setup_bot()
-        await bot.start(DISCORD_TOKEN)
-    
-    def run_bot():
-        asyncio.new_event_loop().run_until_complete(bot_startup())
-    
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    
     port = int(os.getenv('PORT', 5000))
-    logger.info(f"🚀 Démarrage sur le port {port}")
-    
     app.run(
         host='0.0.0.0',
         port=port,
-        debug=False
+        debug=False,
+        use_reloader=False
     )
