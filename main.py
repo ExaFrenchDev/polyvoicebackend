@@ -111,14 +111,23 @@ class RobloxPayout:
 
     def _set_csrf(self):
         try:
+            # Méthode 1: POST logout pour récupérer le token
             r = requests.post("https://auth.roblox.com/v2/logout", headers=self.headers, timeout=5)
-            if r.status_code == 401:
-                logger.error("[Cookie] Cookie invalide (401)")
-                return False
             token = r.headers.get('X-CSRF-TOKEN') or r.headers.get('x-csrf-token')
+            
+            # Méthode 2: GET sur groups si logout ne donne pas de token
+            if not token:
+                r2 = requests.get(f"https://groups.roblox.com/v1/groups/{self.group_id}", 
+                                 headers=self.headers, timeout=5)
+                token = r2.headers.get('X-CSRF-TOKEN') or r2.headers.get('x-csrf-token')
+            
             if token:
                 self.headers['X-CSRF-TOKEN'] = token
-            return True
+                logger.info(f"[CSRF] Token récupéré: {token[:20]}...")
+                return True
+            else:
+                logger.warning("[CSRF] Pas de token trouvé, on continue quand même...")
+                return True
         except Exception as e:
             logger.error(f"[Cookie] Erreur CSRF: {e}")
             return False
