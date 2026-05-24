@@ -85,12 +85,7 @@ def init_db():
 # ============================================================================
 
 class RobloxPayout:
-    """
-    Gère les transferts Robux avec support automatique :
-    - Chef challenge
-    - 2FA TOTP (génération auto depuis secret)
-    - Fallback retry avec différents headers
-    """
+    """Gère les transferts Robux avec support Chef challenge + 2FA TOTP"""
     def __init__(self, roblosecurity, group_id, twofactor_secret=""):
         self.roblosecurity = roblosecurity
         self.group_id = group_id
@@ -111,16 +106,12 @@ class RobloxPayout:
 
     def _set_csrf(self):
         try:
-            # Méthode 1: POST logout pour récupérer le token
             r = requests.post("https://auth.roblox.com/v2/logout", headers=self.headers, timeout=5)
             token = r.headers.get('X-CSRF-TOKEN') or r.headers.get('x-csrf-token')
-            
-            # Méthode 2: GET sur groups si logout ne donne pas de token
             if not token:
                 r2 = requests.get(f"https://groups.roblox.com/v1/groups/{self.group_id}", 
                                  headers=self.headers, timeout=5)
                 token = r2.headers.get('X-CSRF-TOKEN') or r2.headers.get('x-csrf-token')
-            
             if token:
                 self.headers['X-CSRF-TOKEN'] = token
                 logger.info(f"[CSRF] Token récupéré: {token[:20]}...")
@@ -269,10 +260,28 @@ class RobloxPayout:
                 cont_resp = self._continue_challenge(challenge_id, "twostepverification", tfa_proof_data)
                 if not cont_resp or cont_resp.status_code != 200:
                     logger.warning("[Chef+2FA] Continue challenge failed (HTTP %d)", cont_resp.status_code if cont_resp else 0)
+                
+                # ✅ Récupérer le NEW challenge metadata de la réponse continue
+                final_metadata = None
+                if cont_resp and cont_resp.status_code == 200:
+                    try:
+                        cont_data = cont_resp.json()
+                        final_metadata = cont_data.get("challengeMetadata", "")
+                        logger.info(f"[Chef+2FA] Metadata reçu: {final_metadata[:50] if final_metadata else 'None'}...")
+                    except Exception as e:
+                        logger.warning(f"[Chef+2FA] Erreur récupération metadata: {e}")
 
-                # ✅ Retry SANS headers de challenge (2FA complété, pas besoin de les renvoyer)
-                logger.info("[Chef+2FA] Retry payout sans headers challenge...")
-                final = self._payout_request(user_id, amount)
+                # ✅ Retry AVEC le nouveau challenge metadata
+                logger.info("[Chef+2FA] Retry payout avec nouveau metadata...")
+                if final_metadata:
+                    final = self._payout_request(user_id, amount, {
+                        "rblx-challenge-id": challenge_id,
+                        "rblx-challenge-type": "twostepverification",
+                        "rblx-challenge-metadata": final_metadata
+                    })
+                else:
+                    # Fallback: sans headers si pas de metadata
+                    final = self._payout_request(user_id, amount)
 
             elif next_type == "blocksession":
                 logger.error("[Chef] Session bloquée (AutomatedTampering)")
@@ -314,9 +323,27 @@ class RobloxPayout:
             logger.info("[2FA] Continuer le challenge 2FA...")
             cont_resp = self._continue_challenge(challenge_id, "twostepverification", tfa_proof)
             
-            # ✅ Retry SANS headers de challenge (2FA complété, pas besoin de les renvoyer)
-            logger.info("[2FA] Retry payout sans headers challenge...")
-            final = self._payout_request(user_id, amount)
+            # ✅ Récupérer le metadata reçu
+            final_metadata = None
+            if cont_resp and cont_resp.status_code == 200:
+                try:
+                    cont_data = cont_resp.json()
+                    final_metadata = cont_data.get("challengeMetadata", "")
+                    logger.info(f"[2FA] Metadata reçu: {final_metadata[:50] if final_metadata else 'None'}...")
+                except Exception as e:
+                    logger.warning(f"[2FA] Erreur récupération metadata: {e}")
+
+            # ✅ Retry AVEC le nouveau challenge metadata
+            logger.info("[2FA] Retry payout avec nouveau metadata...")
+            if final_metadata:
+                final = self._payout_request(user_id, amount, {
+                    'rblx-challenge-id': challenge_id,
+                    'rblx-challenge-metadata': final_metadata,
+                    'rblx-challenge-type': "twostepverification"
+                })
+            else:
+                # Fallback: sans headers si pas de metadata
+                final = self._payout_request(user_id, amount)
             
             if final.status_code == 200:
                 logger.info("✅ [2FA] Payout réussi après 2FA!")
@@ -331,7 +358,7 @@ class RobloxPayout:
         else:
             logger.error(f"[Cookie] Challenge inconnu: {challenge_type}")
             return False, f"Unknown challenge: {challenge_type}"
-
+        
 
 # ============================================================================
 # ROBLOX API
