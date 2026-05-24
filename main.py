@@ -81,7 +81,7 @@ def init_db():
 
 
 # ============================================================================
-# ROBLOX PAYOUT — RobloxPayout Class (GitHub integration)
+# ROBLOX PAYOUT — RobloxPayout Class (CORRIGÉ)
 # ============================================================================
 
 class RobloxPayout:
@@ -160,11 +160,16 @@ class RobloxPayout:
                 timeout=10
             )
             logger.info(f"[2FA] Response status: {r.status_code}")
-            logger.info(f"[2FA] Response body: {r.text[:500]}")
+            
+            if r.status_code != 200:
+                logger.error(f"[2FA] HTTP {r.status_code}: {r.text[:200]}")
+                return None
+            
             data = r.json()
             if "errors" in data:
-                logger.error(f"[2FA] Erreur verify: {data['errors'][0]['message']}")
+                logger.error(f"[2FA] Erreur verify: {data['errors'][0].get('message', 'unknown')}")
                 return None
+            
             vtoken = data.get("verificationToken")
             logger.info(f"[2FA] ✅ Verification token reçu: {vtoken[:20] if vtoken else 'None'}...")
             return vtoken
@@ -176,12 +181,16 @@ class RobloxPayout:
 
     def _continue_challenge(self, challenge_id, challenge_type, metadata):
         try:
-            return requests.post(
+            resp = requests.post(
                 "https://apis.roblox.com/challenge/v1/continue",
                 headers=self.headers,
                 json={"challengeId": challenge_id, "challengeType": challenge_type, "challengeMetadata": json.dumps(metadata)},
                 timeout=10
             )
+            logger.info(f"[Challenge] Continue {challenge_type}: HTTP {resp.status_code}")
+            if resp.status_code >= 400:
+                logger.warning(f"[Challenge] Response: {resp.text[:200]}")
+            return resp
         except Exception as e:
             logger.error(f"[Challenge] Erreur continue: {e}")
             return None
@@ -208,7 +217,7 @@ class RobloxPayout:
 
         # ── CHEF CHALLENGE ──────────────────────────────────────────────────
         if challenge_type == "chef":
-            logger.info("[Cookie] Chef challenge détecté")
+            logger.info("[Chef] Chef challenge détecté")
             try:
                 chef_meta = json.loads(base64.b64decode(challenge_meta_b64))
             except Exception as e:
@@ -233,7 +242,7 @@ class RobloxPayout:
                 })
 
             elif next_type == "twostepverification":
-                # Chef → 2FA
+                # ✅ CORRECTION: Chef → 2FA
                 logger.info("[Chef] Unlock 2FA required")
                 try:
                     tfa_meta = json.loads(next_meta_raw)
@@ -247,32 +256,35 @@ class RobloxPayout:
                 if not vtoken:
                     return False, "2FA TOTP verification failed"
 
-                tfa_meta["verificationToken"] = vtoken
-                tfa_meta["rememberDevice"] = False
-                self._continue_challenge(challenge_id, "twostepverification", tfa_meta)
-
-                tfa_proof = base64.b64encode(json.dumps({
+                # ✅ Construire la preuve 2FA correctement
+                tfa_proof_data = {
                     "rememberDevice": False,
                     "actionType": "Generic",
                     "verificationToken": vtoken,
                     "challengeId": tfa_cid
-                }).encode()).decode()
+                }
+                
+                # ✅ Continuer le challenge avec la preuve
+                cont_resp = self._continue_challenge(challenge_id, "twostepverification", tfa_proof_data)
+                if not cont_resp or cont_resp.status_code != 200:
+                    logger.warning("[Chef+2FA] Continue challenge failed, proceeding anyway...")
+                
+                # ✅ Encoder la preuve correctement (une seule fois)
+                tfa_proof_b64 = base64.b64encode(
+                    json.dumps(tfa_proof_data).encode()
+                ).decode()
 
-                logger.info("[Chef+2FA] Retry payout avec preuve...")
+                logger.info("[Chef+2FA] Retry payout avec preuve vérifiée...")
                 final = self._payout_request(user_id, amount, {
                     "rblx-challenge-id": challenge_id,
                     "rblx-challenge-type": "twostepverification",
-                    "rblx-challenge-metadata": tfa_proof
+                    "rblx-challenge-metadata": tfa_proof_b64
                 })
 
-                # Fallback si twostepverification échoue
+                # ✅ Fallback intelligent: si twostep échoue, essayer sans headers
                 if final.status_code != 200:
-                    logger.warning("[Chef+2FA] Retry twostep échoué, fallback chef...")
-                    final = self._payout_request(user_id, amount, {
-                        "rblx-challenge-id": challenge_id,
-                        "rblx-challenge-type": "chef",
-                        "rblx-challenge-metadata": challenge_meta_b64
-                    })
+                    logger.warning("[Chef+2FA] Twostep échoué (HTTP %d), fallback sans headers...", final.status_code)
+                    final = self._payout_request(user_id, amount)
 
             elif next_type == "blocksession":
                 logger.error("[Chef] Session bloquée (AutomatedTampering)")
