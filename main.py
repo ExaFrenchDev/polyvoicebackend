@@ -129,24 +129,47 @@ def check_eligibility(user_id, group_id, days_required=MIN_GROUP_TENURE_DAYS):
 
 
 def transfer_robux(target_user_id, amount_robux):
+    """
+    Effectue un transfert de Robux via l'API de groupe Roblox.
+    ✅ Récupère correctement le token CSRF via GET puis POST
+    Retourne (success: bool, roblox_proof: dict)
+    """
     try:
         session = requests.Session()
         session.cookies.set('.ROBLOSECURITY', ACCOUNT_COOKIE)
-        csrf_response = session.post('https://auth.roblox.com/v2/logout', timeout=5)
-        csrf_token = csrf_response.headers.get('x-csrf-token', '')
+        
+        # ✅ ÉTAPE 1: GET sur /home pour récupérer le CSRF token initial
+        csrf_response = session.get('https://www.roblox.com/home', timeout=5)
+        csrf_token = csrf_response.headers.get('X-CSRF-TOKEN', '')
+        
+        logger.info(f"[CSRF] Token après GET /home: {csrf_token[:20]}..." if csrf_token else "[CSRF] Pas de token dans GET")
+        
+        # ✅ ÉTAPE 2: Si pas de token, faire un POST sur /logout pour en générer un
+        if not csrf_token:
+            headers_temp = {'X-CSRF-TOKEN': ''}
+            csrf_response = session.post('https://auth.roblox.com/v2/logout', headers=headers_temp, timeout=5)
+            csrf_token = csrf_response.headers.get('X-CSRF-TOKEN', '')
+            logger.info(f"[CSRF] Token après POST /logout: {csrf_token[:20]}..." if csrf_token else "[CSRF] Pas de token dans POST")
+        
+        # ✅ ÉTAPE 3: Utiliser le token pour le payout du groupe
         headers = {
             'X-CSRF-TOKEN': csrf_token,
             'Content-Type': 'application/json',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
         }
+        
         payload = {
             "PayoutType": "FixedAmount",
             "Recipients": [{"recipientId": target_user_id, "recipientType": "User", "amount": amount_robux}]
         }
+        
+        logger.info(f"[PAYOUT] Tentative: {amount_robux} R$ → user {target_user_id} (groupe {GROUP_ID})")
+        
         response = session.post(
             f'https://groups.roblox.com/v1/groups/{GROUP_ID}/payouts',
             json=payload, headers=headers, timeout=10
         )
+        
         roblox_proof = {
             "endpoint": f"groups/{GROUP_ID}/payouts",
             "recipientId": target_user_id,
@@ -155,12 +178,15 @@ def transfer_robux(target_user_id, amount_robux):
             "response": response.json() if response.content else {},
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
+        
         if response.status_code == 200:
+            logger.info(f"✅ Payout réussi: {amount_robux} R$ → {target_user_id}")
             return True, roblox_proof
         else:
             logger.error(f"❌ Payout failed: {response.status_code} — {response.text}")
             return False, roblox_proof
     except Exception as e:
+        logger.error(f"❌ Exception transfert_robux: {e}")
         return False, {"error": str(e), "timestamp": datetime.utcnow().isoformat() + "Z"}
 
 
