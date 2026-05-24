@@ -346,8 +346,14 @@ class RobloxPayout:
     def _handle_blocksession(self, user_id, amount, retry_count, max_retries):
         if retry_count >= max_retries:
             return False, "Session bloquée — max retries atteint"
-        logger.warning(f"[BlockSession] Attente {DELAY_BLOCKSESSION}s puis réauth complète...")
-        time.sleep(DELAY_BLOCKSESSION)
+        wait = DELAY_BLOCKSESSION * (retry_count + 1)  # 15s, 30s, 45s...
+        logger.warning(f"[BlockSession] Attente {wait}s (tentative {retry_count+1})...")
+        time.sleep(wait)
+        if verify_cookie_validity(self.roblosecurity):
+            logger.info("[BlockSession] Cookie encore valide, juste refresh CSRF...")
+            self.headers.pop('X-CSRF-TOKEN', None)
+            if self._fetch_csrf():
+                return self.payout(user_id, amount, retry_count + 1, max_retries)
         if not self._refresh_cookie_and_csrf():
             return False, "Réauth échouée après blocksession"
         return self.payout(user_id, amount, retry_count + 1, max_retries)
@@ -820,7 +826,7 @@ def get_pending_donations():
         cutoff = datetime.now() - timedelta(days=WAIT_DAYS)
         c.execute(
             '''SELECT * FROM donations WHERE status='pending' AND created_at<=%s AND retry_count<5
-               ORDER BY created_at ASC LIMIT 5''',
+               ORDER BY created_at ASC LIMIT 1''',
             (cutoff,)
         )
         donations = [dict(r) for r in c.fetchall()]
