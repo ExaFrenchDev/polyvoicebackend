@@ -152,19 +152,26 @@ class RobloxPayout:
             logger.error("[2FA] Pas de TOTP disponible")
             return None
         try:
+            logger.info(f"[2FA] Envoi verify: sender_id={sender_id}, challenge_id={challenge_id}, code={code}")
             r = requests.post(
                 f"https://twostepverification.roblox.com/v1/users/{sender_id}/challenges/authenticator/verify",
                 headers=self.headers,
                 json={"actionType": "Generic", "challengeId": challenge_id, "code": code},
                 timeout=10
             )
+            logger.info(f"[2FA] Response status: {r.status_code}")
+            logger.info(f"[2FA] Response body: {r.text[:500]}")
             data = r.json()
             if "errors" in data:
                 logger.error(f"[2FA] Erreur verify: {data['errors'][0]['message']}")
                 return None
-            return data.get("verificationToken")
+            vtoken = data.get("verificationToken")
+            logger.info(f"[2FA] ✅ Verification token reçu: {vtoken[:20] if vtoken else 'None'}...")
+            return vtoken
         except Exception as e:
             logger.error(f"[2FA] Erreur requête verify: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
 
     def _continue_challenge(self, challenge_id, challenge_type, metadata):
