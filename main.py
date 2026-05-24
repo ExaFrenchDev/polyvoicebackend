@@ -30,14 +30,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DEVPRODUCT_AMOUNTS = {
-    "123456": 5,
-    "123457": 10,
-    "123458": 50,
-    "123459": 100,
-    "123460": 500,
-    "123461": 1000,
-    "123462": 5000,
-    "123463": 10000,
+    "3593525234": 1,      # Micro Donation
+    "3593525497": 50,     # Small Donation
+    "3593525652": 100,    # Medium Donation
 }
 
 TAX_RATE = 0.40
