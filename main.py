@@ -727,11 +727,26 @@ def dashboard():
 
   window.markOK = function(btn) {
     var id = btn.getAttribute('data-id');
+    if (!confirm('Effectuer le vrai transfert Roblox pour la donation #' + id + ' ?')) return;
+    btn.disabled = true;
+    btn.textContent = '...';
     fetch(BASE + '/admin/donations/' + id + '/status?password=' + PWD, {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body:'{"status":"completed"}'
-    }).then(function() { showToast('Donation #' + id + ' complétée'); loadTable(); loadStats(); })
-      .catch(function() { showToast('Erreur', true); });
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: '{"status":"completed","force_transfer":true}'
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.transferred) {
+        showToast('Transfert #' + id + ' effectue !');
+      } else if (d.success) {
+        showToast('Statut mis a jour (pas de transfert)');
+      } else {
+        showToast('Echec transfert #' + id + ' — voir logs', true);
+      }
+      loadTable(); loadStats();
+    })
+    .catch(function() { showToast('Erreur reseau', true); btn.disabled = false; btn.textContent = 'OK'; });
   };
 
   window.delRow = function(btn) {
@@ -847,15 +862,78 @@ def admin_update_status(donation_id):
     try:
         data = request.get_json()
         new_status = data.get("status")
+        force_transfer = data.get("force_transfer", False)
+
         if new_status not in ("pending", "completed", "failed"):
             return jsonify({"error": "Invalid status"}), 400
+
         conn = get_db()
         c = conn.cursor()
+        c.execute('SELECT * FROM donations WHERE id = %s', (donation_id,))
+        row = c.fetchone()
+        if not row:
+            c.close(); conn.close()
+            return jsonify({"error": "Donation not found"}), 404
+        donation = dict(row)
+
+        # ✅ Si force_transfer=True ET status=completed → on fait le vrai transfert Roblox
+        if new_status == "completed" and force_transfer:
+            target_user_id = donation['target_player_id']
+            amount = donation['final_amount']
+
+            success, roblox_proof = transfer_robux(target_user_id, amount)
+
+            if success:
+                c.execute('''
+                    UPDATE donations SET status = 'completed', processed_at = NOW() WHERE id = %s
+                ''', (donation_id,))
+                conn.commit()
+                c.close(); conn.close()
+
+                # Mettre à jour l'embed Discord
+                donor_info  = get_user_info(donation['player_id'])
+                target_info = get_user_info(donation['target_player_id'])
+                donor_name  = donor_info.get("name",  str(donation['player_id']))        if donor_info  else str(donation['player_id'])
+                target_name = target_info.get("name", str(donation['target_player_id'])) if target_info else str(donation['target_player_id'])
+                taxes = donation['amount_robux'] - donation['final_amount']
+                edit_discord_success(
+                    donation.get('discord_message_id'),
+                    donor_name, donation['player_id'],
+                    target_name, donation['target_player_id'],
+                    donation['amount_robux'], donation['final_amount'],
+                    taxes, donation_id, roblox_proof
+                )
+                logger.info(f"✅ Transfert admin forcé réussi pour donation #{donation_id}: {amount} R$ → {target_user_id}")
+                return jsonify({"success": True, "transferred": True, "proof": roblox_proof}), 200
+            else:
+                c.execute('''
+                    UPDATE donations SET status = 'failed', retry_count = retry_count + 1, last_retry = NOW() WHERE id = %s
+                ''', (donation_id,))
+                conn.commit()
+                c.close(); conn.close()
+
+                donor_info  = get_user_info(donation['player_id'])
+                target_info = get_user_info(donation['target_player_id'])
+                donor_name  = donor_info.get("name",  str(donation['player_id']))        if donor_info  else str(donation['player_id'])
+                target_name = target_info.get("name", str(donation['target_player_id'])) if target_info else str(donation['target_player_id'])
+                edit_discord_failed(
+                    donation.get('discord_message_id'),
+                    donor_name, donation['player_id'],
+                    target_name, donation['target_player_id'],
+                    donation['amount_robux'], donation['final_amount'],
+                    donation_id, f"Échec transfert admin (HTTP {roblox_proof.get('httpStatus', '?')})"
+                )
+                logger.error(f"❌ Transfert admin échoué pour donation #{donation_id}: {roblox_proof}")
+                return jsonify({"success": False, "transferred": False, "proof": roblox_proof}), 200
+
+        # Sinon → simple changement de statut sans transfert
         c.execute('UPDATE donations SET status = %s WHERE id = %s', (new_status, donation_id))
         conn.commit()
         c.close(); conn.close()
-        return jsonify({"success": True}), 200
+        return jsonify({"success": True, "transferred": False}), 200
+
     except Exception as e:
+        logger.error(f"Erreur admin_update_status: {e}")
         return jsonify({"error": str(e)}), 500
 
 
