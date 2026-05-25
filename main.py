@@ -65,6 +65,64 @@ DELAY_BLOCKSESSION  = 15.0
 cookie_lock    = threading.Lock()
 payout_executor = ThreadPoolExecutor(max_workers=3)
 
+# ============================================================================
+# ACCOUNT POOL
+# ============================================================================
+
+ACCOUNT_POOL = []
+
+def init_account_pool():
+    """
+    Charge les comptes depuis les variables d'env.
+    Format JSON : ROBLOX_ACCOUNTS=[{"label":"compte1","cookie":"...","secret":"..."}]
+    Fallback : compte unique ROBLOX_ACCOUNT_COOKIE + ROBLOX_2FA_SECRET
+    """
+    raw = os.getenv("ROBLOX_ACCOUNTS", "")
+    if raw:
+        try:
+            accounts = json.loads(raw)
+            for acc in accounts:
+                ACCOUNT_POOL.append({
+                    "cookie": acc.get("cookie", ""),
+                    "secret": acc.get("secret", ""),
+                    "blocked_until": 0,
+                    "label": acc.get("label", "unknown")
+                })
+            logger.info(f"[Pool] ✅ {len(ACCOUNT_POOL)} compte(s) chargé(s)")
+            return
+        except Exception as e:
+            logger.error(f"[Pool] ❌ JSON parse: {e}")
+
+    if ACCOUNT_COOKIE:
+        ACCOUNT_POOL.append({
+            "cookie": ACCOUNT_COOKIE,
+            "secret": ROBLOX_2FA_SECRET,
+            "blocked_until": 0,
+            "label": "default"
+        })
+        logger.info("[Pool] ✅ 1 compte (legacy single account)")
+
+
+def get_available_account():
+    """Retourne le premier compte non bloqué."""
+    if not ACCOUNT_POOL:
+        return None
+    now = time.time()
+    for acc in ACCOUNT_POOL:
+        if acc["blocked_until"] <= now:
+            return acc
+    best = min(ACCOUNT_POOL, key=lambda a: a["blocked_until"])
+    wait = best["blocked_until"] - now
+    logger.warning(f"[Pool] Tous les comptes bloqués — attente {wait:.0f}s sur '{best['label']}'")
+    time.sleep(wait + 1)
+    return best
+
+
+def mark_account_blocked(acc, duration=120):
+    """Marque un compte comme bloqué pour `duration` secondes."""
+    acc["blocked_until"] = time.time() + duration
+    logger.warning(f"[Pool] ⛔ Compte '{acc['label']}' bloqué pour {duration}s")
+
 
 # ============================================================================
 # COOKIE MANAGEMENT
@@ -466,7 +524,7 @@ class RobloxPayout:
 
 
 # ============================================================================
-# TRANSFER
+# TRANSFER — VERSION POOL
 # ============================================================================
 
 def transfer_robux_opencloud(target_user_id, amount_robux):
@@ -494,13 +552,48 @@ def transfer_robux_opencloud(target_user_id, amount_robux):
         return False, {"error": str(e), "timestamp": datetime.utcnow().isoformat() + "Z"}
 
 
-def transfer_robux_cookie_2fa(target_user_id, amount_robux):
-    cookie = get_valid_cookie()
-    if not cookie:
-        return False, {"error": "Cookie invalide", "timestamp": datetime.utcnow().isoformat() + "Z"}
-    payout  = RobloxPayout(cookie, GROUP_ID, ROBLOX_2FA_SECRET)
+def transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts=None):
+    """
+    Tente le payout en tournant sur les comptes disponibles.
+    Si blocksession → marque le compte, passe au suivant.
+    """
+    if tried_accounts is None:
+        tried_accounts = set()
+
+    acc = get_available_account()
+    if not acc:
+        return False, {"error": "Aucun compte disponible", "timestamp": datetime.utcnow().isoformat() + "Z"}
+
+    acc_key = acc["label"]
+
+    if acc_key in tried_accounts:
+        return False, {"error": "Tous les comptes ont échoué", "timestamp": datetime.utcnow().isoformat() + "Z"}
+    tried_accounts.add(acc_key)
+
+    cookie = acc["cookie"]
+    if not verify_cookie_validity(cookie):
+        logger.warning(f"[Pool] Cookie '{acc_key}' invalide, tentative réauth...")
+        new_cookie = reauthenticate_roblox()
+        if new_cookie:
+            acc["cookie"] = new_cookie
+            cookie = new_cookie
+        else:
+            mark_account_blocked(acc, duration=300)
+            return transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts)
+
+    payout = RobloxPayout(cookie, GROUP_ID, acc["secret"])
+
+    original_handle = payout._handle_blocksession
+
+    def pool_handle_blocksession(user_id, amount, retry_count, max_retries):
+        logger.warning(f"[Pool] BlockSession sur '{acc_key}' → rotation vers prochain compte")
+        mark_account_blocked(acc, duration=120)
+        return transfer_robux_cookie_pool(user_id, amount, tried_accounts)
+
+    payout._handle_blocksession = pool_handle_blocksession
+
     success, detail = payout.payout(target_user_id, amount_robux)
-    method  = "cookie_totp" if ROBLOX_2FA_SECRET else ("cookie_imap" if IMAP_AVAILABLE else "cookie_only")
+    method = f"pool:{acc_key}"
     return success, {
         "method":      method,
         "recipientId": target_user_id,
@@ -516,9 +609,11 @@ def transfer_robux(target_user_id, amount_robux):
         success, proof = transfer_robux_opencloud(target_user_id, amount_robux)
         if success:
             return True, proof
-        logger.warning("[Payout] OpenCloud échoué → fallback Cookie+2FA")
-    if ACCOUNT_COOKIE or (ROBLOX_USERNAME and ROBLOX_PASSWORD):
-        return transfer_robux_cookie_2fa(target_user_id, amount_robux)
+        logger.warning("[Payout] OpenCloud échoué → fallback Pool")
+
+    if ACCOUNT_POOL:
+        return transfer_robux_cookie_pool(target_user_id, amount_robux)
+
     return False, {"error": "Aucune méthode configurée", "timestamp": datetime.utcnow().isoformat() + "Z"}
 
 
@@ -922,7 +1017,7 @@ def health_check():
         "2fa_totp":   PYOTP_AVAILABLE and bool(ROBLOX_2FA_SECRET),
         "2fa_imap":   IMAP_AVAILABLE,
         "opencloud":  bool(ROBLOX_API_KEY),
-        "cookie":     bool(ACCOUNT_COOKIE),
+        "pool_size":  len(ACCOUNT_POOL),
         "reauth":     bool(ROBLOX_USERNAME and ROBLOX_PASSWORD),
     }), 200
 
@@ -1390,6 +1485,8 @@ def admin_mark_completed():
 # STARTUP
 # ============================================================================
 
+init_account_pool()
+
 if DATABASE_URL:
     try:
         init_db()
@@ -1400,7 +1497,7 @@ else:
     logger.warning("⚠️ DATABASE_URL non configurée")
 
 logger.info(f"🔑 API Key:   {'✅' if ROBLOX_API_KEY else '❌'}")
-logger.info(f"🍪 Cookie:    {'✅' if ACCOUNT_COOKIE else '❌'}")
+logger.info(f"🍪 Pool:      {'✅ ' + str(len(ACCOUNT_POOL)) if ACCOUNT_POOL else '❌'}")
 logger.info(f"🔐 TOTP:      {'✅' if ROBLOX_2FA_SECRET and PYOTP_AVAILABLE else '❌'}")
 logger.info(f"📧 IMAP 2FA:  {'✅' if IMAP_AVAILABLE else '❌'}")
 logger.info(f"🔄 Réauth:    {'✅' if ROBLOX_USERNAME and ROBLOX_PASSWORD else '❌'}")
