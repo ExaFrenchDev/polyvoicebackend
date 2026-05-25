@@ -9,6 +9,7 @@ import math
 import json
 import base64
 import time
+import random
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
@@ -65,18 +66,9 @@ DELAY_BLOCKSESSION  = 15.0
 cookie_lock    = threading.Lock()
 payout_executor = ThreadPoolExecutor(max_workers=3)
 
-# ============================================================================
-# ACCOUNT POOL
-# ============================================================================
-
 ACCOUNT_POOL = []
 
 def init_account_pool():
-    """
-    Charge les comptes depuis les variables d'env.
-    Format JSON : ROBLOX_ACCOUNTS=[{"label":"compte1","cookie":"...","secret":"..."}]
-    Fallback : compte unique ROBLOX_ACCOUNT_COOKIE + ROBLOX_2FA_SECRET
-    """
     raw = os.getenv("ROBLOX_ACCOUNTS", "")
     if raw:
         try:
@@ -104,7 +96,6 @@ def init_account_pool():
 
 
 def get_available_account():
-    """Retourne le premier compte non bloqué."""
     if not ACCOUNT_POOL:
         return None
     now = time.time()
@@ -119,29 +110,41 @@ def get_available_account():
 
 
 def mark_account_blocked(acc, duration=120):
-    """Marque un compte comme bloqué pour `duration` secondes."""
     acc["blocked_until"] = time.time() + duration
     logger.warning(f"[Pool] ⛔ Compte '{acc['label']}' bloqué pour {duration}s")
 
 
-# ============================================================================
-# COOKIE MANAGEMENT
-# ============================================================================
-
-def reauthenticate_roblox():
+def reauthenticate_roblox(retry_count=0, max_retries=3):
     if not ROBLOX_USERNAME or not ROBLOX_PASSWORD:
         return None
+
+    if retry_count > 0:
+        delay = min(5 * (2 ** (retry_count - 1)), 60)
+        jitter = random.uniform(0, 5)
+        total_delay = delay + jitter
+        logger.warning(f"[Reauth] ⏳ Attente {total_delay:.1f}s avant retry (tentative {retry_count+1})...")
+        time.sleep(total_delay)
+
     try:
-        logger.info(f"[Reauth] 🔄 Login {ROBLOX_USERNAME}...")
+        user_agents = [
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1",
+        ]
+        ua = user_agents[retry_count % len(user_agents)]
+
+        logger.info(f"[Reauth] 🔄 Login {ROBLOX_USERNAME}... (tentative {retry_count+1}/{max_retries+1})")
         session = requests.Session()
+
         pre = session.post(
             "https://auth.roblox.com/v2/logout",
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers={"User-Agent": ua},
             timeout=5, json={}
         )
         csrf = pre.headers.get('X-CSRF-TOKEN') or pre.headers.get('x-csrf-token', '')
 
-        headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
+        headers = {"User-Agent": ua, "Content-Type": "application/json"}
         if csrf:
             headers["X-CSRF-TOKEN"] = csrf
 
@@ -153,32 +156,52 @@ def reauthenticate_roblox():
         logger.info(f"[Reauth] HTTP {resp.status_code}")
 
         if resp.status_code == 200:
-            cookie = session.cookies.get('.ROBLOSECURITY')
-            if cookie:
-                os.environ['ROBLOX_ACCOUNT_COOKIE'] = cookie
-                globals()['ACCOUNT_COOKIE'] = cookie
-                logger.info("[Reauth] ✅ Cookie obtenu")
-                return cookie
+            new_cookie = session.cookies.get('.ROBLOSECURITY')
+            if new_cookie:
+                logger.info(f"✅ Nouveau cookie obtenu: {new_cookie[:30]}...")
+                os.environ['ROBLOX_ACCOUNT_COOKIE'] = new_cookie
+                globals()['ACCOUNT_COOKIE'] = new_cookie
+                return new_cookie
+            logger.error("❌ Pas de .ROBLOSECURITY dans les cookies")
+            return None
 
         elif resp.status_code == 403:
             new_csrf = resp.headers.get('X-CSRF-TOKEN') or resp.headers.get('x-csrf-token')
             if new_csrf:
+                logger.info(f"[Reauth] Nouveau CSRF après 403, retry...")
                 headers["X-CSRF-TOKEN"] = new_csrf
                 resp2 = session.post(
                     "https://auth.roblox.com/v2/login",
                     json={"ctype": "Username", "cvalue": ROBLOX_USERNAME, "passwd": ROBLOX_PASSWORD},
                     headers=headers, timeout=10
                 )
+                logger.info(f"[Reauth] Login retry HTTP {resp2.status_code}")
                 if resp2.status_code == 200:
-                    cookie = session.cookies.get('.ROBLOSECURITY')
-                    if cookie:
-                        os.environ['ROBLOX_ACCOUNT_COOKIE'] = cookie
-                        globals()['ACCOUNT_COOKIE'] = cookie
-                        logger.info("[Reauth] ✅ Cookie obtenu (retry)")
-                        return cookie
-        return None
+                    new_cookie = session.cookies.get('.ROBLOSECURITY')
+                    if new_cookie:
+                        logger.info(f"✅ Cookie obtenu (retry): {new_cookie[:30]}...")
+                        os.environ['ROBLOX_ACCOUNT_COOKIE'] = new_cookie
+                        globals()['ACCOUNT_COOKIE'] = new_cookie
+                        return new_cookie
+
+            if retry_count < max_retries:
+                logger.warning(f"[Reauth] 403 persistent — retry {retry_count+1}/{max_retries}")
+                return reauthenticate_roblox(retry_count + 1, max_retries)
+            else:
+                logger.error(f"[Reauth] ❌ Max retries atteint. Probablement rate-limitée ou identifiants incorrects.")
+                return None
+
+        else:
+            logger.error(f"[Reauth] ❌ HTTP {resp.status_code}: {resp.text[:200]}")
+            if retry_count < max_retries:
+                return reauthenticate_roblox(retry_count + 1, max_retries)
+            return None
+
     except Exception as e:
-        logger.error(f"[Reauth] ❌ {e}")
+        logger.error(f"[Reauth] ❌ Exception: {e}")
+        if retry_count < max_retries:
+            logger.info(f"[Reauth] Retry après exception...")
+            return reauthenticate_roblox(retry_count + 1, max_retries)
         return None
 
 
@@ -208,9 +231,17 @@ def get_valid_cookie():
     return reauthenticate_roblox()
 
 
-# ============================================================================
-# ROBLOX PAYOUT
-# ============================================================================
+PAYOUT_COOLDOWN = {}
+
+def apply_payout_cooldown(account_label, cooldown_seconds=30):
+    now = time.time()
+    last = PAYOUT_COOLDOWN.get(account_label, 0)
+    if now - last < cooldown_seconds:
+        wait = cooldown_seconds - (now - last)
+        logger.info(f"[Cooldown] Attente {wait:.1f}s avant payout sur '{account_label}'...")
+        time.sleep(wait)
+    PAYOUT_COOLDOWN[account_label] = time.time()
+
 
 class RobloxPayout:
     def __init__(self, roblosecurity, group_id, twofactor_secret=""):
@@ -261,7 +292,7 @@ class RobloxPayout:
 
     def _set_csrf(self):
         if not verify_cookie_validity(self.roblosecurity):
-            new_cookie = reauthenticate_roblox()
+            new_cookie = reauthenticate_roblox(0, 3)
             if not new_cookie:
                 return False
             self.roblosecurity = new_cookie
@@ -270,7 +301,7 @@ class RobloxPayout:
 
     def _refresh_cookie_and_csrf(self):
         logger.info("[Refresh] Force réauth + CSRF...")
-        new_cookie = reauthenticate_roblox()
+        new_cookie = reauthenticate_roblox(0, 3)
         if not new_cookie:
             return False
         self.roblosecurity = new_cookie
@@ -380,8 +411,8 @@ class RobloxPayout:
     def _handle_blocksession(self, user_id, amount, retry_count, max_retries):
         if retry_count >= max_retries:
             return False, "Session bloquée — max retries atteint"
-        wait = DELAY_BLOCKSESSION * (retry_count + 1)
-        logger.warning(f"[BlockSession] Attente {wait}s (tentative {retry_count+1})...")
+        wait = min(DELAY_BLOCKSESSION * (2 ** retry_count), 180)
+        logger.warning(f"[BlockSession] Attente {wait:.0f}s (tentative {retry_count+1})...")
         time.sleep(wait)
         if verify_cookie_validity(self.roblosecurity):
             logger.info("[BlockSession] Cookie encore valide, juste refresh CSRF...")
@@ -412,7 +443,7 @@ class RobloxPayout:
             logger.error(f"[Payout] ❌ Pas de challenge headers — HTTP {r.status_code}: {r.text[:200]}")
             if r.status_code == 403 and retry_count < max_retries:
                 logger.warning("[Payout] 403 sans challenge → réauth + retry")
-                new_cookie = reauthenticate_roblox()
+                new_cookie = reauthenticate_roblox(0, 3)
                 if new_cookie:
                     self.roblosecurity = new_cookie
                     self.headers['Cookie'] = f'.ROBLOSECURITY={new_cookie}'
@@ -523,10 +554,6 @@ class RobloxPayout:
             return False, f"Unknown challenge: {challenge_type}"
 
 
-# ============================================================================
-# TRANSFER — VERSION POOL
-# ============================================================================
-
 def transfer_robux_opencloud(target_user_id, amount_robux):
     try:
         response = requests.post(
@@ -553,10 +580,6 @@ def transfer_robux_opencloud(target_user_id, amount_robux):
 
 
 def transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts=None):
-    """
-    Tente le payout en tournant sur les comptes disponibles.
-    Si blocksession → marque le compte, passe au suivant.
-    """
     if tried_accounts is None:
         tried_accounts = set()
 
@@ -570,15 +593,18 @@ def transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts=None
         return False, {"error": "Tous les comptes ont échoué", "timestamp": datetime.utcnow().isoformat() + "Z"}
     tried_accounts.add(acc_key)
 
+    apply_payout_cooldown(acc_key, cooldown_seconds=20)
+
     cookie = acc["cookie"]
     if not verify_cookie_validity(cookie):
         logger.warning(f"[Pool] Cookie '{acc_key}' invalide, tentative réauth...")
-        new_cookie = reauthenticate_roblox()
+        new_cookie = reauthenticate_roblox(0, 3)
         if new_cookie:
             acc["cookie"] = new_cookie
             cookie = new_cookie
         else:
-            mark_account_blocked(acc, duration=300)
+            mark_account_blocked(acc, duration=600)
+            logger.warning(f"[Pool] Réauth échouée → rotation")
             return transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts)
 
     payout = RobloxPayout(cookie, GROUP_ID, acc["secret"])
@@ -586,22 +612,25 @@ def transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts=None
     original_handle = payout._handle_blocksession
 
     def pool_handle_blocksession(user_id, amount, retry_count, max_retries):
-        logger.warning(f"[Pool] BlockSession sur '{acc_key}' → rotation vers prochain compte")
+        logger.warning(f"[Pool] BlockSession sur '{acc_key}' → rotation")
         mark_account_blocked(acc, duration=120)
+        time.sleep(random.uniform(5, 15))
         return transfer_robux_cookie_pool(user_id, amount, tried_accounts)
 
     payout._handle_blocksession = pool_handle_blocksession
 
     success, detail = payout.payout(target_user_id, amount_robux)
     method = f"pool:{acc_key}"
-    return success, {
-        "method":      method,
+    proof = {
+        "method": method,
+        "endpoint": f"groups/{GROUP_ID}/payouts",
         "recipientId": target_user_id,
-        "amountSent":  amount_robux,
-        "httpStatus":  200 if success else 403,
-        "response":    {"detail": detail},
-        "timestamp":   datetime.utcnow().isoformat() + "Z"
+        "amountSent": amount_robux,
+        "httpStatus": 200 if success else 403,
+        "response": {"detail": detail},
+        "timestamp": datetime.utcnow().isoformat() + "Z"
     }
+    return success, proof
 
 
 def transfer_robux(target_user_id, amount_robux):
@@ -616,10 +645,6 @@ def transfer_robux(target_user_id, amount_robux):
 
     return False, {"error": "Aucune méthode configurée", "timestamp": datetime.utcnow().isoformat() + "Z"}
 
-
-# ============================================================================
-# PAYOUT ASYNC
-# ============================================================================
 
 def _process_payout_async(donation_id, target_user_id, amount,
                            discord_message_id, player_id, amount_robux, final_amount):
@@ -661,10 +686,6 @@ def _process_payout_async(donation_id, target_user_id, amount,
         logger.error(traceback.format_exc())
 
 
-# ============================================================================
-# DATABASE
-# ============================================================================
-
 def get_db():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -691,10 +712,6 @@ def init_db():
     conn.close()
     logger.info("✅ Table donations prête")
 
-
-# ============================================================================
-# ROBLOX API HELPERS
-# ============================================================================
 
 def verify_webhook_signature(data, signature):
     if not WEBHOOK_SECRET:
@@ -740,10 +757,6 @@ def check_eligibility(user_id, group_id, days_required=MIN_GROUP_TENURE_DAYS):
             pass
     return {"eligible": True, "reason": "Meets all requirements"}
 
-
-# ============================================================================
-# DISCORD
-# ============================================================================
 
 def send_discord_notification(donor_id, donor_name, target_id, target_name,
                                amount, final_amount, taxes, donation_id, estimated_date):
@@ -825,10 +838,6 @@ def edit_discord_failed(message_id, donor_name, donor_id, target_name, target_id
     except Exception as e:
         logger.error(f"[Discord edit] {e}")
 
-
-# ============================================================================
-# FLASK ROUTES
-# ============================================================================
 
 @app.route('/webhook/devproduct', methods=['POST'])
 def handle_devproduct_purchase():
@@ -1026,10 +1035,6 @@ def health_check():
 def index():
     return jsonify({"service": "PolyVoice Donation Backend", "status": "running"}), 200
 
-
-# ============================================================================
-# ADMIN ROUTES
-# ============================================================================
 
 def _admin_auth(req):
     return req.args.get('password', '') == ADMIN_PASSWORD
@@ -1337,10 +1342,14 @@ def admin_stats():
     try:
         conn = get_db()
         c    = conn.cursor()
-        c.execute("SELECT COUNT(*) AS n FROM donations");                                       total     = c.fetchone()["n"]
-        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status='pending'");                pending   = c.fetchone()["n"]
-        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status='completed'");              completed = c.fetchone()["n"]
-        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status IN ('failed','processing')"); failed  = c.fetchone()["n"]
+        c.execute("SELECT COUNT(*) AS n FROM donations")
+        total     = c.fetchone()["n"]
+        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status='pending'")
+        pending   = c.fetchone()["n"]
+        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status='completed'")
+        completed = c.fetchone()["n"]
+        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status IN ('failed','processing')")
+        failed  = c.fetchone()["n"]
         c.close()
         conn.close()
         db_info = "non configurée"
@@ -1454,7 +1463,8 @@ def admin_cleanup_pending():
     try:
         conn = get_db()
         c    = conn.cursor()
-        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status='pending'"); cnt = c.fetchone()["n"]
+        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status='pending'")
+        cnt = c.fetchone()["n"]
         c.execute("DELETE FROM donations WHERE status='pending'")
         conn.commit()
         c.close()
@@ -1480,10 +1490,6 @@ def admin_mark_completed():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
-# ============================================================================
-# STARTUP
-# ============================================================================
 
 init_account_pool()
 
