@@ -164,8 +164,6 @@ class RobloxPayout:
             'User-Agent': 'Mozilla/5.0'
         }
 
-    # ── TOTP ─────────────────────────────────────────────────────────────────
-
     def _get_totp(self):
         if not PYOTP_AVAILABLE or not self.twofactor_secret:
             return None
@@ -174,8 +172,6 @@ class RobloxPayout:
         except Exception as e:
             logger.error(f"[TOTP] {e}")
             return None
-
-    # ── CSRF ─────────────────────────────────────────────────────────────────
 
     def _fetch_csrf(self):
         try:
@@ -224,8 +220,6 @@ class RobloxPayout:
         self.headers.pop('X-CSRF-TOKEN', None)
         return self._fetch_csrf()
 
-    # ── PAYOUT REQUEST ───────────────────────────────────────────────────────
-
     def _payout_request(self, user_id, amount, extra_headers=None):
         h = self.headers.copy()
         if extra_headers:
@@ -237,22 +231,13 @@ class RobloxPayout:
             timeout=10
         )
 
-    # ── 2FA ──────────────────────────────────────────────────────────────────
-
     def _resolve_2fa_code(self, method_hint="authenticator"):
-        """
-        Résout le code 2FA en utilisant TOTP ou IMAP selon la disponibilité.
-        method_hint : 'authenticator' | 'email'
-        Retourne le code (str) ou None.
-        """
-        # 1. TOTP — prioritaire si le secret est configuré et que c'est une auth app
         if method_hint == "authenticator" or not method_hint:
             code = self._get_totp()
             if code:
                 logger.info(f"[2FA] 🔑 Code TOTP: {code}")
                 return code, "authenticator"
 
-        # 2. IMAP — fallback email ou si pas de TOTP configuré
         if IMAP_AVAILABLE:
             logger.info(f"[2FA] 📧 Pas de TOTP disponible — tentative IMAP (method={method_hint})...")
             code = fetch_roblox_email_code(timeout=60, poll_interval=5)
@@ -266,15 +251,10 @@ class RobloxPayout:
         return None, None
 
     def _verify_2fa(self, sender_id, challenge_id, method_hint="authenticator"):
-        """
-        Vérifie le challenge 2FA en choisissant automatiquement
-        l'endpoint Roblox correspondant au type de code obtenu.
-        """
         code, resolved_method = self._resolve_2fa_code(method_hint)
         if not code:
             return None
 
-        # Choix de l'endpoint selon la méthode résolue
         if resolved_method == "email":
             endpoint = f"https://twostepverification.roblox.com/v1/users/{sender_id}/challenges/email/verify"
         else:
@@ -291,7 +271,6 @@ class RobloxPayout:
             if r.status_code != 200:
                 logger.error(f"[2FA] ❌ {r.text[:200]}")
 
-                # Si authenticator a échoué, tenter IMAP en dernier recours
                 if resolved_method == "authenticator" and IMAP_AVAILABLE:
                     logger.info("[2FA] 🔄 Authenticator échoué → tentative IMAP fallback...")
                     imap_code = fetch_roblox_email_code(timeout=60, poll_interval=5)
@@ -323,11 +302,8 @@ class RobloxPayout:
             logger.error(f"[2FA] ❌ Exception: {e}")
             return None
 
-    # Alias pour compatibilité avec l'ancien code
     def _verify_totp(self, sender_id, challenge_id):
         return self._verify_2fa(sender_id, challenge_id, method_hint="authenticator")
-
-    # ── CHALLENGE ────────────────────────────────────────────────────────────
 
     def _continue_challenge(self, challenge_id, challenge_type, metadata):
         try:
@@ -346,7 +322,7 @@ class RobloxPayout:
     def _handle_blocksession(self, user_id, amount, retry_count, max_retries):
         if retry_count >= max_retries:
             return False, "Session bloquée — max retries atteint"
-        wait = DELAY_BLOCKSESSION * (retry_count + 1)  # 15s, 30s, 45s...
+        wait = DELAY_BLOCKSESSION * (retry_count + 1)
         logger.warning(f"[BlockSession] Attente {wait}s (tentative {retry_count+1})...")
         time.sleep(wait)
         if verify_cookie_validity(self.roblosecurity):
@@ -357,8 +333,6 @@ class RobloxPayout:
         if not self._refresh_cookie_and_csrf():
             return False, "Réauth échouée après blocksession"
         return self.payout(user_id, amount, retry_count + 1, max_retries)
-
-    # ── PAYOUT PRINCIPAL ─────────────────────────────────────────────────────
 
     def payout(self, user_id, amount, retry_count=0, max_retries=3):
         if retry_count == 0:
@@ -389,7 +363,6 @@ class RobloxPayout:
                         return self.payout(user_id, amount, retry_count + 1, max_retries)
             return False, f"No challenge headers (HTTP {r.status_code})"
 
-        # ── CHEF ─────────────────────────────────────────────────────────────
         if challenge_type == "chef":
             logger.info("[Chef] 👨‍🍳 Challenge")
             try:
@@ -454,7 +427,6 @@ class RobloxPayout:
             logger.error(f"❌ [Chef] {final.text[:200]}")
             return False, final.text
 
-        # ── 2FA DIRECT ───────────────────────────────────────────────────────
         elif challenge_type == "twostepverification":
             logger.info("[2FA] 🔐 Challenge direct")
             try:
@@ -968,6 +940,301 @@ def _admin_auth(req):
     return req.args.get('password', '') == ADMIN_PASSWORD
 
 
+@app.route('/admin', methods=['GET'])
+def dashboard():
+    if not _admin_auth(request):
+        return "Access denied", 403
+
+    html = r"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PolyVoice — Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a0f; --surface: #111118; --border: #1e1e2e; --border-hi: #2a2a3e;
+    --text: #e2e2f0; --muted: #6b6b8a; --accent: #7c6af7; --accent-glow: rgba(124,106,247,0.15);
+    --green: #22d3a0; --green-bg: rgba(34,211,160,0.08);
+    --yellow: #f5c842; --yellow-bg: rgba(245,200,66,0.08);
+    --red: #f05a5a; --red-bg: rgba(240,90,90,0.08);
+    --blue: #60a5fa;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:'IBM Plex Sans',sans-serif; font-size:14px; min-height:100vh; }
+  body::before {
+    content:''; position:fixed; inset:0;
+    background-image: linear-gradient(var(--border) 1px,transparent 1px), linear-gradient(90deg,var(--border) 1px,transparent 1px);
+    background-size:40px 40px; opacity:0.4; pointer-events:none; z-index:0;
+  }
+  .wrap { position:relative; z-index:1; max-width:1300px; margin:0 auto; padding:28px 24px; }
+  .topbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:32px; padding-bottom:20px; border-bottom:1px solid var(--border); }
+  .logo { display:flex; align-items:center; gap:12px; }
+  .logo-dot { width:10px; height:10px; background:var(--accent); border-radius:50%; box-shadow:0 0 10px var(--accent); animation:pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .logo-title { font-family:'IBM Plex Mono',monospace; font-size:16px; font-weight:600; letter-spacing:0.05em; }
+  .logo-sub { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:0.1em; text-transform:uppercase; }
+  .topbar-right { display:flex; align-items:center; gap:20px; }
+  .live-badge { display:flex; align-items:center; gap:6px; background:var(--green-bg); border:1px solid rgba(34,211,160,0.2); padding:5px 12px; border-radius:20px; font-size:11px; color:var(--green); font-family:'IBM Plex Mono',monospace; }
+  .live-dot { width:6px; height:6px; background:var(--green); border-radius:50%; animation:pulse 1.5s infinite; }
+  .clock { font-family:'IBM Plex Mono',monospace; font-size:13px; color:var(--muted); }
+  .db-badge { display:flex; align-items:center; gap:10px; background:rgba(124,106,247,0.06); border:1px solid rgba(124,106,247,0.2); border-radius:8px; padding:10px 16px; margin-bottom:24px; font-size:12px; font-family:'IBM Plex Mono',monospace; color:var(--muted); }
+  .db-badge strong { color:var(--accent); }
+  .stats-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:28px; }
+  .stat-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:20px; position:relative; overflow:hidden; }
+  .stat-card::before { content:''; position:absolute; top:0; left:0; right:0; height:2px; }
+  .s-total::before    { background:linear-gradient(90deg,var(--accent),transparent); }
+  .s-pending::before  { background:linear-gradient(90deg,var(--yellow),transparent); }
+  .s-completed::before{ background:linear-gradient(90deg,var(--green),transparent); }
+  .s-failed::before   { background:linear-gradient(90deg,var(--red),transparent); }
+  .stat-label { font-size:10px; text-transform:uppercase; letter-spacing:0.12em; color:var(--muted); margin-bottom:12px; font-family:'IBM Plex Mono',monospace; }
+  .stat-value { font-size:38px; font-weight:600; font-family:'IBM Plex Mono',monospace; line-height:1; }
+  .s-total .stat-value    { color:var(--accent); }
+  .s-pending .stat-value  { color:var(--yellow); }
+  .s-completed .stat-value{ color:var(--green); }
+  .s-failed .stat-value   { color:var(--red); }
+  .toolbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }
+  .toolbar-left { display:flex; align-items:center; gap:12px; }
+  .section-title { font-family:'IBM Plex Mono',monospace; font-size:13px; font-weight:500; letter-spacing:0.05em; }
+  .count-badge { background:var(--accent-glow); border:1px solid rgba(124,106,247,0.3); color:var(--accent); font-size:11px; font-family:'IBM Plex Mono',monospace; padding:2px 8px; border-radius:4px; }
+  .btn-group { display:flex; gap:8px; }
+  .btn { display:inline-flex; align-items:center; gap:6px; padding:7px 14px; border-radius:6px; font-size:12px; font-weight:500; cursor:pointer; border:1px solid transparent; transition:all 0.15s; }
+  .btn-ghost { background:transparent; border-color:var(--border-hi); color:var(--muted); }
+  .btn-ghost:hover { border-color:var(--text); color:var(--text); }
+  .btn-green { background:var(--green-bg); border-color:rgba(34,211,160,0.3); color:var(--green); }
+  .btn-green:hover { background:rgba(34,211,160,0.15); }
+  .btn-red { background:var(--red-bg); border-color:rgba(240,90,90,0.3); color:var(--red); }
+  .btn-red:hover { background:rgba(240,90,90,0.15); }
+  .table-wrap { background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+  table { width:100%; border-collapse:collapse; }
+  thead tr { border-bottom:1px solid var(--border); background:rgba(255,255,255,0.02); }
+  th { padding:11px 16px; text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); font-family:'IBM Plex Mono',monospace; }
+  tbody tr { border-bottom:1px solid var(--border); transition:background 0.1s; }
+  tbody tr:last-child { border-bottom:none; }
+  tbody tr:hover { background:rgba(255,255,255,0.025); }
+  td { padding:13px 16px; }
+  .id-cell { font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--muted); }
+  .name-cell { font-weight:500; }
+  .amount-cell { font-family:'IBM Plex Mono',monospace; font-size:12px; }
+  .amount-gross { color:var(--muted); }
+  .amount-net { color:var(--green); font-weight:500; }
+  .date-cell { font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--muted); }
+  .badge { display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:4px; font-size:11px; font-weight:500; font-family:'IBM Plex Mono',monospace; }
+  .badge::before { content:''; width:5px; height:5px; border-radius:50%; }
+  .badge-pending   { background:var(--yellow-bg); color:var(--yellow); border:1px solid rgba(245,200,66,0.2); }
+  .badge-pending::before { background:var(--yellow); }
+  .badge-completed { background:var(--green-bg); color:var(--green); border:1px solid rgba(34,211,160,0.2); }
+  .badge-completed::before { background:var(--green); }
+  .badge-failed    { background:var(--red-bg); color:var(--red); border:1px solid rgba(240,90,90,0.2); }
+  .badge-failed::before { background:var(--red); }
+  .badge-requeue   { background:rgba(96,165,250,0.08); color:var(--blue); border:1px solid rgba(96,165,250,0.2); }
+  .badge-requeue::before { background:var(--blue); }
+  .row-actions { display:flex; gap:6px; }
+  .row-btn { padding:4px 10px; border-radius:4px; font-size:11px; font-family:'IBM Plex Mono',monospace; cursor:pointer; border:1px solid transparent; transition:all 0.12s; font-weight:500; }
+  .row-btn-ok  { background:var(--green-bg); border-color:rgba(34,211,160,0.25); color:var(--green); }
+  .row-btn-ok:hover  { background:rgba(34,211,160,0.18); }
+  .row-btn-del { background:var(--red-bg); border-color:rgba(240,90,90,0.25); color:var(--red); }
+  .row-btn-del:hover { background:rgba(240,90,90,0.18); }
+  .empty-state { text-align:center; padding:60px 20px; color:var(--muted); font-family:'IBM Plex Mono',monospace; font-size:13px; }
+  .spinner { display:inline-block; width:18px; height:18px; border:2px solid var(--border-hi); border-top-color:var(--accent); border-radius:50%; animation:spin 0.7s linear infinite; vertical-align:middle; margin-right:8px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .toast { position:fixed; bottom:24px; right:24px; padding:12px 20px; border-radius:8px; font-size:13px; font-family:'IBM Plex Mono',monospace; font-weight:500; pointer-events:none; z-index:9999; opacity:0; transform:translateY(8px); transition:all 0.2s; }
+  .toast.show { opacity:1; transform:translateY(0); }
+  .toast-success { background:var(--green-bg); border:1px solid rgba(34,211,160,0.3); color:var(--green); }
+  .toast-error   { background:var(--red-bg); border:1px solid rgba(240,90,90,0.3); color:var(--red); }
+  @media(max-width:900px){ .stats-grid{grid-template-columns:repeat(2,1fr);} }
+  @media(max-width:600px){ .stats-grid{grid-template-columns:1fr 1fr;} .topbar{flex-direction:column;gap:12px;} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="logo">
+      <div class="logo-dot"></div>
+      <div>
+        <div class="logo-title">POLYVOICE</div>
+        <div class="logo-sub">Donation Admin</div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <div class="live-badge"><span class="live-dot"></span>LIVE</div>
+      <div class="clock" id="clock">--:--:--</div>
+    </div>
+  </div>
+  <div class="db-badge">
+    <span>🗄</span>
+    <span>Base de données : <strong>Supabase / PostgreSQL</strong> &nbsp;|&nbsp; <span id="dbUrl">chargement...</span></span>
+  </div>
+  <div class="stats-grid">
+    <div class="stat-card s-total">    <div class="stat-label">Total</div>    <div class="stat-value" id="s-total">—</div></div>
+    <div class="stat-card s-pending">  <div class="stat-label">En attente</div><div class="stat-value" id="s-pending">—</div></div>
+    <div class="stat-card s-completed"><div class="stat-label">Complétées</div><div class="stat-value" id="s-completed">—</div></div>
+    <div class="stat-card s-failed">   <div class="stat-label">Échouées</div>  <div class="stat-value" id="s-failed">—</div></div>
+  </div>
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <span class="section-title">DONATIONS</span>
+      <span class="count-badge" id="countBadge">0</span>
+    </div>
+    <div class="btn-group">
+      <button class="btn btn-ghost"  id="refreshBtn">      ↻ Refresh</button>
+      <button class="btn btn-green"  id="completeAllBtn">  ✓ Tout compléter</button>
+      <button class="btn btn-red"    id="deletePendingBtn">✕ Suppr. pending</button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#ID</th><th>Donateur</th><th>Receveur</th>
+          <th>Brut</th><th>Net</th><th>Statut</th><th>Date</th><th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="tableBody">
+        <tr><td colspan="8" class="empty-state"><span class="spinner"></span>Chargement...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+(function() {
+  var BASE = window.location.origin;
+  var PWD = (function() {
+    var pairs = window.location.search.substring(1).split('&');
+    for (var i = 0; i < pairs.length; i++) {
+      var kv = pairs[i].split('=');
+      if (kv[0] === 'password') return decodeURIComponent(kv[1] || '');
+    }
+    return '';
+  })();
+  function tickClock() {
+    var n = new Date();
+    document.getElementById('clock').textContent =
+      n.getHours().toString().padStart(2,'0')+':'+
+      n.getMinutes().toString().padStart(2,'0')+':'+
+      n.getSeconds().toString().padStart(2,'0');
+  }
+  setInterval(tickClock, 1000); tickClock();
+  var toastTimer = null;
+  function showToast(msg, isErr) {
+    var el = document.getElementById('toast');
+    el.textContent = msg;
+    el.className = 'toast show ' + (isErr ? 'toast-error' : 'toast-success');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function() { el.className = 'toast'; }, 3000);
+  }
+  function badgeClass(st) {
+    if (st === 'pending')   return 'badge-pending';
+    if (st === 'completed') return 'badge-completed';
+    if (st === 'failed')    return 'badge-failed';
+    if (st === 'requeue')   return 'badge-requeue';
+    return 'badge-pending';
+  }
+  function fmtDate(str) {
+    if (!str) return '—';
+    var d = new Date(str);
+    if (isNaN(d.getTime())) return str;
+    return d.getDate().toString().padStart(2,'0') + '/'
+      + (d.getMonth()+1).toString().padStart(2,'0') + '/'
+      + d.getFullYear() + ' '
+      + d.getHours().toString().padStart(2,'0') + ':'
+      + d.getMinutes().toString().padStart(2,'0');
+  }
+  function loadStats() {
+    fetch(BASE + '/admin/stats?password=' + PWD)
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        document.getElementById('s-total').textContent     = d.total     !== undefined ? d.total     : '?';
+        document.getElementById('s-pending').textContent   = d.pending   !== undefined ? d.pending   : '?';
+        document.getElementById('s-completed').textContent = d.completed !== undefined ? d.completed : '?';
+        document.getElementById('s-failed').textContent    = d.failed    !== undefined ? d.failed    : '?';
+        if (d.db_info) document.getElementById('dbUrl').textContent = d.db_info;
+      }).catch(function(e) { console.error('Stats:', e); });
+  }
+  function loadTable() {
+    fetch(BASE + '/admin/donations?password=' + PWD)
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        var tbody = document.getElementById('tableBody');
+        var list  = d.donations || [];
+        document.getElementById('countBadge').textContent = list.length;
+        if (list.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="8" class="empty-state">/ / Aucune donation trouvée / /</td></tr>';
+          return;
+        }
+        var rows = '';
+        for (var i = 0; i < list.length; i++) {
+          var item = list[i];
+          var st   = item.status || 'pending';
+          rows += '<tr>';
+          rows += '<td class="id-cell">#' + item.id + '</td>';
+          rows += '<td class="name-cell">' + (item.donor_name  || item.player_id) + '</td>';
+          rows += '<td class="name-cell">' + (item.target_name || item.target_player_id) + '</td>';
+          rows += '<td class="amount-cell amount-gross">' + item.amount_robux + ' R$</td>';
+          rows += '<td class="amount-cell amount-net">'   + item.final_amount + ' R$</td>';
+          rows += '<td><span class="badge ' + badgeClass(st) + '">' + st + '</span></td>';
+          rows += '<td class="date-cell">' + fmtDate(item.created_at) + '</td>';
+          rows += '<td><div class="row-actions">';
+          rows += '<button class="row-btn row-btn-ok"  data-id="' + item.id + '" onclick="markOK(this)">✓ OK</button>';
+          rows += '<button class="row-btn row-btn-del" data-id="' + item.id + '" onclick="delRow(this)">✕ DEL</button>';
+          rows += '</div></td></tr>';
+        }
+        tbody.innerHTML = rows;
+      }).catch(function() {
+        document.getElementById('tableBody').innerHTML =
+          '<tr><td colspan="8" class="empty-state">Erreur de chargement</td></tr>';
+      });
+  }
+  window.markOK = function(btn) {
+    var id = btn.getAttribute('data-id');
+    if (!confirm('Effectuer le vrai transfert Roblox pour la donation #' + id + ' ?')) return;
+    btn.disabled = true; btn.textContent = '...';
+    fetch(BASE + '/admin/donations/' + id + '/status?password=' + PWD, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: '{"status":"completed","force_transfer":true}'
+    }).then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.async) showToast('Transfert #' + id + ' lancé en arrière-plan');
+        else if (d.success) showToast('Statut mis à jour');
+        else showToast('Echec #' + id + ' — voir logs', true);
+        loadTable(); loadStats();
+      }).catch(function() { showToast('Erreur réseau', true); btn.disabled = false; btn.textContent = '✓ OK'; });
+  };
+  window.delRow = function(btn) {
+    var id = btn.getAttribute('data-id');
+    if (!confirm('Supprimer la donation #' + id + ' ?')) return;
+    fetch(BASE + '/admin/donations/' + id + '?password=' + PWD, {method:'DELETE'})
+      .then(function() { showToast('Supprimée #' + id); loadTable(); loadStats(); })
+      .catch(function() { showToast('Erreur', true); });
+  };
+  document.getElementById('refreshBtn').onclick = function() { loadStats(); loadTable(); showToast('Données rechargées'); };
+  document.getElementById('completeAllBtn').onclick = function() {
+    if (!confirm('Marquer TOUTES les pending comme completed ?')) return;
+    fetch(BASE + '/admin/mark-completed?password=' + PWD, {method:'POST'})
+      .then(function(r) { return r.json(); })
+      .then(function(d) { showToast(d.updated + ' donation(s) complétée(s)'); loadTable(); loadStats(); })
+      .catch(function() { showToast('Erreur', true); });
+  };
+  document.getElementById('deletePendingBtn').onclick = function() {
+    if (!confirm('Supprimer TOUTES les donations pending ?')) return;
+    fetch(BASE + '/admin/cleanup?password=' + PWD, {method:'POST'})
+      .then(function(r) { return r.json(); })
+      .then(function(d) { showToast(d.deleted + ' supprimée(s)'); loadTable(); loadStats(); })
+      .catch(function() { showToast('Erreur', true); });
+  };
+  loadStats(); loadTable();
+  setInterval(function() { loadStats(); loadTable(); }, 20000);
+})();
+</script>
+</body>
+</html>"""
+    return html
+
+
 @app.route('/admin/stats', methods=['GET'])
 def admin_stats():
     if not _admin_auth(request):
@@ -981,7 +1248,19 @@ def admin_stats():
         c.execute("SELECT COUNT(*) AS n FROM donations WHERE status IN ('failed','processing')"); failed  = c.fetchone()["n"]
         c.close()
         conn.close()
-        return jsonify({"total": total, "pending": pending, "completed": completed, "failed": failed}), 200
+        db_info = "non configurée"
+        if DATABASE_URL:
+            try:
+                from urllib.parse import urlparse
+                u = urlparse(DATABASE_URL)
+                db_info = u.hostname or "supabase"
+            except Exception:
+                db_info = "supabase"
+        return jsonify({
+            "total": total, "pending": pending,
+            "completed": completed, "failed": failed,
+            "db_info": db_info
+        }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1080,8 +1359,7 @@ def admin_cleanup_pending():
     try:
         conn = get_db()
         c    = conn.cursor()
-        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status='pending'")
-        cnt = c.fetchone()["n"]
+        c.execute("SELECT COUNT(*) AS n FROM donations WHERE status='pending'"); cnt = c.fetchone()["n"]
         c.execute("DELETE FROM donations WHERE status='pending'")
         conn.commit()
         c.close()
