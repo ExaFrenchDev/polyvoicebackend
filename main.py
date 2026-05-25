@@ -14,6 +14,7 @@ import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
 import threading
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
@@ -59,80 +60,120 @@ TAX_RATE              = 0.60
 WAIT_DAYS             = 7
 MIN_GROUP_TENURE_DAYS = 7
 
-# ⚡ DÉLAIS AUGMENTÉS POUR ÉVITER IP-BAN
-DELAY_AFTER_CSRF        = 20.0     # 5 → 20
-DELAY_AFTER_2FA         = 35.0     # 15 → 35
-DELAY_BEFORE_FINAL      = 35.0     # 15 → 35
-DELAY_BLOCKSESSION      = 600.0    # 120 → 600 (10 min)
-DELAY_BETWEEN_PAYOUTS   = 90.0     # NEW: 90s min entre payouts globaux
+DELAY_AFTER_CSRF        = 20.0
+DELAY_AFTER_2FA         = 35.0
+DELAY_BEFORE_FINAL      = 35.0
+DELAY_BLOCKSESSION      = 600.0
+DELAY_BETWEEN_PAYOUTS   = 90.0
 
-ACCOUNT_BLOCK_DURATION_SHORT         = 900         # 15 min
-ACCOUNT_BLOCK_DURATION_LONG          = 3600        # 1h
-ACCOUNT_BLOCK_DURATION_BLOCKSESSION  = 1800        # 30 min
+ACCOUNT_BLOCK_DURATION_SHORT        = 900
+ACCOUNT_BLOCK_DURATION_LONG         = 3600
+ACCOUNT_BLOCK_DURATION_BLOCKSESSION = 1800
 
 cookie_lock     = threading.Lock()
 payout_executor = ThreadPoolExecutor(max_workers=3)
 
 ACCOUNT_POOL = []
-IP_PAYOUT_COOLDOWN = {}  # {"ip": timestamp}
-LAST_PAYOUT_TIME = 0     # Global cooldown
+IP_PAYOUT_COOLDOWN = {}
+LAST_PAYOUT_TIME = 0
 
-# ===== PROXIES GRATUITS =====
-FREE_PROXIES = [
-    "http://8.208.89.166:8000",
-    "http://34.233.139.34:8080",
-    "http://45.33.102.141:3128",
-    "http://52.21.235.162:3128",
-    "http://119.91.20.80:8000",
-    "http://168.119.195.94:8000",
-    "http://140.238.11.206:3128",
-    "http://188.166.210.127:8080",
-    "http://193.56.224.17:3128",
-    "http://77.38.89.192:8080",
+# ===== PROXIES =====
+PROXY_SOURCES = [
+    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=all&simplified=true",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+    "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+]
+
+TEST_URLS = [
+    "http://httpbin.org/ip",
+    "http://ip-api.com/json",
+    "http://checkip.amazonaws.com",
 ]
 
 WORKING_PROXIES = []
 PROXY_INDEX = 0
+PROXY_LOCK = threading.Lock()
+
+
+def fetch_proxies_from_apis():
+    proxies = set()
+    for url in PROXY_SOURCES:
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                lines = [
+                    l.strip() for l in resp.text.strip().splitlines()
+                    if l.strip() and ':' in l and not l.startswith('#')
+                ]
+                proxies.update(lines)
+                logger.info(f"[Proxy API] ✅ {url[:50]}... → {len(lines)} proxies")
+        except Exception as e:
+            logger.warning(f"[Proxy API] ❌ {url[:50]}... — {e}")
+    return list(proxies)
+
 
 def test_proxy(proxy_url):
-    """Teste si un proxy fonctionne"""
-    try:
-        resp = requests.get(
-            "https://httpbin.org/ip",
-            proxies={"https": proxy_url, "http": proxy_url},
-            timeout=5
-        )
-        if resp.status_code == 200:
-            logger.info(f"[Proxy] ✅ {proxy_url}")
-            return True
-    except Exception as e:
-        logger.warning(f"[Proxy] ❌ {proxy_url} — {e}")
-    return False
+    if not proxy_url.startswith('http'):
+        proxy_url = f"http://{proxy_url}"
+    for test_url in TEST_URLS:
+        try:
+            resp = requests.get(
+                test_url,
+                proxies={"http": proxy_url, "https": proxy_url},
+                timeout=5
+            )
+            if resp.status_code == 200:
+                return proxy_url, True
+        except Exception:
+            continue
+    return proxy_url, False
 
-def init_proxies():
-    """Initialise les proxies gratuits"""
+
+def init_proxies(sample_size=150, workers=25):
     global WORKING_PROXIES
-    logger.info("[Proxy] 🧪 Test des proxies...")
-    for proxy in FREE_PROXIES:
-        if test_proxy(proxy):
-            WORKING_PROXIES.append(proxy)
-    
+    logger.info("[Proxy] 🔄 Récupération depuis APIs gratuites...")
+
+    all_proxies = fetch_proxies_from_apis()
+    logger.info(f"[Proxy] 📋 {len(all_proxies)} proxies récupérés — test en cours...")
+
+    sample = random.sample(all_proxies, min(sample_size, len(all_proxies)))
+    working = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        for proxy, ok in executor.map(test_proxy, sample):
+            if ok:
+                working.append(proxy)
+
+    with PROXY_LOCK:
+        WORKING_PROXIES = working
+
     if WORKING_PROXIES:
-        logger.info(f"[Proxy] ✅ {len(WORKING_PROXIES)} proxy/proxies opérationnel(s)")
+        logger.info(f"[Proxy] ✅ {len(WORKING_PROXIES)} proxies opérationnels")
     else:
-        logger.warning("[Proxy] ⚠️ Aucun proxy disponible — utilisation IP directe")
+        logger.warning("[Proxy] ⚠️ Aucun proxy — utilisation IP directe")
+
+
+def refresh_proxies_background():
+    def _loop():
+        while True:
+            time.sleep(1200)  # 20 min
+            logger.info("[Proxy] 🔄 Rafraîchissement automatique...")
+            init_proxies()
+    threading.Thread(target=_loop, daemon=True).start()
+
 
 def get_next_proxy():
-    """Récupère le prochain proxy en rotation"""
     global PROXY_INDEX
-    if not WORKING_PROXIES:
-        return None
-    proxy = WORKING_PROXIES[PROXY_INDEX % len(WORKING_PROXIES)]
-    PROXY_INDEX += 1
-    return proxy
+    with PROXY_LOCK:
+        if not WORKING_PROXIES:
+            return None
+        proxy = WORKING_PROXIES[PROXY_INDEX % len(WORKING_PROXIES)]
+        PROXY_INDEX += 1
+        return proxy
+
 
 def apply_ip_cooldown(ip, cooldown_seconds=120):
-    """Attend avant de faire un payout de la même IP"""
     now = time.time()
     last = IP_PAYOUT_COOLDOWN.get(ip, 0)
     if now - last < cooldown_seconds:
@@ -141,8 +182,8 @@ def apply_ip_cooldown(ip, cooldown_seconds=120):
         time.sleep(wait)
     IP_PAYOUT_COOLDOWN[ip] = time.time()
 
+
 def apply_global_payout_cooldown(cooldown_seconds=90):
-    """Cooldown global entre tous les payouts"""
     global LAST_PAYOUT_TIME
     now = time.time()
     if now - LAST_PAYOUT_TIME < cooldown_seconds:
@@ -150,6 +191,7 @@ def apply_global_payout_cooldown(cooldown_seconds=90):
         logger.info(f"[Global Cooldown] Attente {wait:.1f}s...")
         time.sleep(wait)
     LAST_PAYOUT_TIME = time.time()
+
 
 def init_account_pool():
     raw = os.getenv("ROBLOX_ACCOUNTS", "")
@@ -164,7 +206,7 @@ def init_account_pool():
                     "password":      acc.get("password", ""),
                     "blocked_until": 0,
                     "label":         acc.get("label", f"account_{i}"),
-                    "proxy":         get_next_proxy()  # Assigner proxy
+                    "proxy":         get_next_proxy()
                 })
             logger.info(f"[Pool] ✅ {len(ACCOUNT_POOL)} compte(s) chargé(s)")
             return
@@ -179,7 +221,7 @@ def init_account_pool():
             "password":      ROBLOX_PASSWORD,
             "blocked_until": 0,
             "label":         "default",
-            "proxy":         get_next_proxy()  # Assigner proxy
+            "proxy":         get_next_proxy()
         })
         logger.info("[Pool] ✅ 1 compte (legacy single account)")
 
@@ -204,7 +246,6 @@ def mark_account_blocked(acc, duration=120):
 
 
 def verify_cookie_validity(cookie, proxy=None):
-    """Vérifie la validité du cookie et détecte les bans"""
     try:
         proxies = {"https": proxy, "http": proxy} if proxy else None
         resp = requests.get(
@@ -218,7 +259,7 @@ def verify_cookie_validity(cookie, proxy=None):
             logger.info(f"[Cookie] ✅ {data.get('name')} ({data.get('id')})")
             return True
         elif resp.status_code == 429:
-            logger.warning(f"[Cookie] ⚠️ HTTP 429 (Rate-limited)")
+            logger.warning("[Cookie] ⚠️ HTTP 429 (Rate-limited)")
             return "rate_limited"
         elif resp.status_code in (403, 401):
             logger.warning(f"[Cookie] ❌ HTTP {resp.status_code} (Invalid/Banned)")
@@ -231,6 +272,7 @@ def verify_cookie_validity(cookie, proxy=None):
 
 
 PAYOUT_COOLDOWN = {}
+
 
 def apply_payout_cooldown(account_label, cooldown_seconds=60):
     now = time.time()
@@ -320,7 +362,7 @@ class RobloxPayout:
                 return code, "authenticator"
 
         if IMAP_AVAILABLE:
-            logger.info(f"[2FA] 📧 Tentative IMAP...")
+            logger.info("[2FA] 📧 Tentative IMAP...")
             code = fetch_roblox_email_code(timeout=60, poll_interval=5)
             if code:
                 logger.info(f"[2FA] ✅ Code IMAP: {code}")
@@ -410,14 +452,14 @@ class RobloxPayout:
     def payout(self, user_id, amount, retry_count=0, max_retries=2):
         if retry_count == 0:
             if not self._set_csrf():
-                logger.warning(f"[Payout] Cookie invalide ou CSRF échoué")
+                logger.warning("[Payout] Cookie invalide ou CSRF échoué")
                 return False, "Cookie invalide / CSRF échoué"
 
         logger.info(f"[Payout] tentative {retry_count+1}/{max_retries+1}: {amount} R$ → {user_id}")
         r = self._payout_request(user_id, amount)
 
         if r.status_code == 200:
-            logger.info(f"✅ [Payout] Réussi!")
+            logger.info("✅ [Payout] Réussi!")
             return True, "ok"
 
         challenge_type     = r.headers.get("rblx-challenge-type", "").lower()
@@ -438,7 +480,7 @@ class RobloxPayout:
                 chef_meta = json.loads(base64.b64decode(challenge_meta_b64))
             except Exception as e:
                 logger.error(f"[Chef] Metadata decode failed: {e}")
-                return False, f"Chef metadata error"
+                return False, "Chef metadata error"
 
             cont = self._continue_challenge(challenge_id, "chef", chef_meta)
             if not cont:
@@ -460,9 +502,9 @@ class RobloxPayout:
             elif next_type == "twostepverification":
                 logger.info("[Chef] 🔐 2FA requis")
                 try:
-                    tfa_meta = json.loads(cont_data.get("challengeMetadata", "{}"))
-                    tfa_user = tfa_meta["userId"]
-                    tfa_cid = tfa_meta["challengeId"]
+                    tfa_meta   = json.loads(cont_data.get("challengeMetadata", "{}"))
+                    tfa_user   = tfa_meta["userId"]
+                    tfa_cid    = tfa_meta["challengeId"]
                     tfa_method = tfa_meta.get("mediaType", "authenticator").lower()
                 except Exception as e:
                     logger.error(f"[Chef] 2FA metadata: {e}")
@@ -480,10 +522,10 @@ class RobloxPayout:
                     "userId": tfa_user,
                     "challengeId": tfa_cid,
                 })
-                
+
                 if not cont2 or cont2.status_code >= 400:
                     return False, "2FA continue failed"
-                
+
                 if cont2.json().get("challengeType") == "blocksession":
                     return self._handle_blocksession(user_id, amount, retry_count, max_retries)
 
@@ -499,9 +541,9 @@ class RobloxPayout:
         elif challenge_type == "twostepverification":
             logger.info("[2FA] 🔐 Challenge direct")
             try:
-                meta = json.loads(base64.b64decode(challenge_meta_b64))
+                meta   = json.loads(base64.b64decode(challenge_meta_b64))
                 sender = meta["userId"]
-                cid = meta["challengeId"]
+                cid    = meta["challengeId"]
                 tfa_method = meta.get("mediaType", "authenticator").lower()
             except Exception as e:
                 logger.error(f"[2FA] Metadata: {e}")
@@ -518,50 +560,45 @@ class RobloxPayout:
                 "userId": sender,
                 "challengeId": cid,
             })
-            
+
             if not cont2 or cont2.status_code >= 400:
                 return False, "2FA continue failed"
-            
+
             if cont2.json().get("challengeType") == "blocksession":
                 return self._handle_blocksession(user_id, amount, retry_count, max_retries)
 
             time.sleep(DELAY_BEFORE_FINAL)
             final = self._payout_request(user_id, amount)
             return final.status_code == 200, final.text
-        
+
         else:
             return False, f"Unknown challenge type: {challenge_type}"
 
 
 def transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts=None):
     apply_global_payout_cooldown(DELAY_BETWEEN_PAYOUTS)
-    
+
     if tried_accounts is None:
         tried_accounts = set()
 
     acc = get_available_account()
     if not acc:
-        logger.error("[Pool] ❌ Aucun compte disponible — tous bloqués")
-        return False, {
-            "error": "Tous les comptes sont bloqués. Attendre quelques minutes.",
-            "timestamp": datetime.utcnow().isoformat() + "Z"
-        }
+        logger.error("[Pool] ❌ Aucun compte disponible")
+        return False, {"error": "Tous les comptes sont bloqués.", "timestamp": datetime.utcnow().isoformat() + "Z"}
 
     acc_key = acc["label"]
-    
     if acc_key in tried_accounts:
         logger.error(f"[Pool] ❌ Tous les {len(ACCOUNT_POOL)} comptes ont échoué")
-        return False, {
-            "error": "Tous les comptes du pool ont échoué",
-            "timestamp": datetime.utcnow().isoformat() + "Z"
-        }
-    
+        return False, {"error": "Tous les comptes du pool ont échoué", "timestamp": datetime.utcnow().isoformat() + "Z"}
+
     tried_accounts.add(acc_key)
-    logger.info(f"[Pool] 🎯 Tentative avec '{acc_key}' ({len(tried_accounts)}/{len(ACCOUNT_POOL)}) — Proxy: {acc.get('proxy', 'NONE')}")
+
+    # Rotation proxy à chaque tentative
+    acc["proxy"] = get_next_proxy()
+    proxy = acc.get("proxy")
+    logger.info(f"[Pool] 🎯 Tentative avec '{acc_key}' ({len(tried_accounts)}/{len(ACCOUNT_POOL)}) — Proxy: {proxy or 'DIRECT'}")
 
     cookie = acc["cookie"]
-    proxy = acc.get("proxy")
-    
     validity = verify_cookie_validity(cookie, proxy)
     if validity != True:
         logger.warning(f"[Pool] Cookie '{acc_key}' invalide ({validity}) → blocage 1h")
@@ -570,42 +607,40 @@ def transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts=None
         return transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts)
 
     payout = RobloxPayout(cookie, GROUP_ID, acc["secret"], proxy)
-    
+
     def pool_blocksession_handler(user_id, amount, retry_count, max_retries):
-        logger.warning(f"[Pool] BlockSession détecté sur '{acc_key}' → blocage 30min + rotation")
+        logger.warning(f"[Pool] BlockSession sur '{acc_key}' → blocage 30min + rotation proxy")
         mark_account_blocked(acc, duration=ACCOUNT_BLOCK_DURATION_BLOCKSESSION)
         time.sleep(random.uniform(5, 10))
         return transfer_robux_cookie_pool(user_id, amount, tried_accounts)
-    
+
     payout._handle_blocksession = pool_blocksession_handler
 
     success, detail = payout.payout(target_user_id, amount_robux)
-    
+
     proof = {
-        "method": f"pool:{acc_key}:proxy:{proxy}",
-        "endpoint": f"groups/{GROUP_ID}/payouts",
+        "method":     f"pool:{acc_key}:proxy:{proxy or 'direct'}",
+        "endpoint":   f"groups/{GROUP_ID}/payouts",
         "recipientId": target_user_id,
         "amountSent": amount_robux,
         "httpStatus": 200 if success else 403,
-        "response": {"detail": detail},
-        "timestamp": datetime.utcnow().isoformat() + "Z"
+        "response":   {"detail": detail},
+        "timestamp":  datetime.utcnow().isoformat() + "Z"
     }
-    
+
     if success:
         logger.info(f"✅ [Pool] Payout réussi avec '{acc_key}'")
         return True, proof
-    
+
     logger.error(f"❌ [Pool] Payout échoué avec '{acc_key}': {detail}")
     mark_account_blocked(acc, duration=ACCOUNT_BLOCK_DURATION_SHORT)
     time.sleep(random.uniform(5, 15))
-    
     return transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts)
 
 
 def transfer_robux(target_user_id, amount_robux):
     if ACCOUNT_POOL:
         return transfer_robux_cookie_pool(target_user_id, amount_robux)
-
     return False, {"error": "Aucune méthode configurée", "timestamp": datetime.utcnow().isoformat() + "Z"}
 
 
@@ -1031,7 +1066,6 @@ def admin_stats():
         db_info = "non configurée"
         if DATABASE_URL:
             try:
-                from urllib.parse import urlparse
                 u = urlparse(DATABASE_URL)
                 db_info = u.hostname or "supabase"
             except Exception:
@@ -1167,7 +1201,9 @@ def admin_mark_completed():
         return jsonify({"error": str(e)}), 500
 
 
+# ===== INIT =====
 init_proxies()
+refresh_proxies_background()
 init_account_pool()
 
 if DATABASE_URL:
