@@ -15,6 +15,7 @@ import psycopg2.extras
 from dotenv import load_dotenv
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 
 try:
     import pyotp
@@ -58,33 +59,112 @@ TAX_RATE              = 0.60
 WAIT_DAYS             = 7
 MIN_GROUP_TENURE_DAYS = 7
 
-DELAY_AFTER_CSRF    = 5.0
-DELAY_AFTER_2FA     = 15.0
-DELAY_BEFORE_FINAL  = 15.0
-DELAY_BLOCKSESSION  = 120.0
+# ⚡ DÉLAIS AUGMENTÉS POUR ÉVITER IP-BAN
+DELAY_AFTER_CSRF        = 20.0     # 5 → 20
+DELAY_AFTER_2FA         = 35.0     # 15 → 35
+DELAY_BEFORE_FINAL      = 35.0     # 15 → 35
+DELAY_BLOCKSESSION      = 600.0    # 120 → 600 (10 min)
+DELAY_BETWEEN_PAYOUTS   = 90.0     # NEW: 90s min entre payouts globaux
 
-ACCOUNT_BLOCK_DURATION_SHORT = 180
-ACCOUNT_BLOCK_DURATION_LONG = 1800
-ACCOUNT_BLOCK_DURATION_BLOCKSESSION = 600
+ACCOUNT_BLOCK_DURATION_SHORT         = 900         # 15 min
+ACCOUNT_BLOCK_DURATION_LONG          = 3600        # 1h
+ACCOUNT_BLOCK_DURATION_BLOCKSESSION  = 1800        # 30 min
 
 cookie_lock     = threading.Lock()
 payout_executor = ThreadPoolExecutor(max_workers=3)
 
 ACCOUNT_POOL = []
+IP_PAYOUT_COOLDOWN = {}  # {"ip": timestamp}
+LAST_PAYOUT_TIME = 0     # Global cooldown
+
+# ===== PROXIES GRATUITS =====
+FREE_PROXIES = [
+    "http://8.208.89.166:8000",
+    "http://34.233.139.34:8080",
+    "http://45.33.102.141:3128",
+    "http://52.21.235.162:3128",
+    "http://119.91.20.80:8000",
+    "http://168.119.195.94:8000",
+    "http://140.238.11.206:3128",
+    "http://188.166.210.127:8080",
+    "http://193.56.224.17:3128",
+    "http://77.38.89.192:8080",
+]
+
+WORKING_PROXIES = []
+PROXY_INDEX = 0
+
+def test_proxy(proxy_url):
+    """Teste si un proxy fonctionne"""
+    try:
+        resp = requests.get(
+            "https://httpbin.org/ip",
+            proxies={"https": proxy_url, "http": proxy_url},
+            timeout=5
+        )
+        if resp.status_code == 200:
+            logger.info(f"[Proxy] ✅ {proxy_url}")
+            return True
+    except Exception as e:
+        logger.warning(f"[Proxy] ❌ {proxy_url} — {e}")
+    return False
+
+def init_proxies():
+    """Initialise les proxies gratuits"""
+    global WORKING_PROXIES
+    logger.info("[Proxy] 🧪 Test des proxies...")
+    for proxy in FREE_PROXIES:
+        if test_proxy(proxy):
+            WORKING_PROXIES.append(proxy)
+    
+    if WORKING_PROXIES:
+        logger.info(f"[Proxy] ✅ {len(WORKING_PROXIES)} proxy/proxies opérationnel(s)")
+    else:
+        logger.warning("[Proxy] ⚠️ Aucun proxy disponible — utilisation IP directe")
+
+def get_next_proxy():
+    """Récupère le prochain proxy en rotation"""
+    global PROXY_INDEX
+    if not WORKING_PROXIES:
+        return None
+    proxy = WORKING_PROXIES[PROXY_INDEX % len(WORKING_PROXIES)]
+    PROXY_INDEX += 1
+    return proxy
+
+def apply_ip_cooldown(ip, cooldown_seconds=120):
+    """Attend avant de faire un payout de la même IP"""
+    now = time.time()
+    last = IP_PAYOUT_COOLDOWN.get(ip, 0)
+    if now - last < cooldown_seconds:
+        wait = cooldown_seconds - (now - last)
+        logger.info(f"[IP Cooldown] {ip} — attente {wait:.1f}s")
+        time.sleep(wait)
+    IP_PAYOUT_COOLDOWN[ip] = time.time()
+
+def apply_global_payout_cooldown(cooldown_seconds=90):
+    """Cooldown global entre tous les payouts"""
+    global LAST_PAYOUT_TIME
+    now = time.time()
+    if now - LAST_PAYOUT_TIME < cooldown_seconds:
+        wait = cooldown_seconds - (now - LAST_PAYOUT_TIME)
+        logger.info(f"[Global Cooldown] Attente {wait:.1f}s...")
+        time.sleep(wait)
+    LAST_PAYOUT_TIME = time.time()
 
 def init_account_pool():
     raw = os.getenv("ROBLOX_ACCOUNTS", "")
     if raw:
         try:
             accounts = json.loads(raw)
-            for acc in accounts:
+            for i, acc in enumerate(accounts):
                 ACCOUNT_POOL.append({
-                    "cookie":       acc.get("cookie", ""),
-                    "secret":       acc.get("secret", ""),
-                    "username":     acc.get("username", ""),
-                    "password":     acc.get("password", ""),
+                    "cookie":        acc.get("cookie", ""),
+                    "secret":        acc.get("secret", ""),
+                    "username":      acc.get("username", ""),
+                    "password":      acc.get("password", ""),
                     "blocked_until": 0,
-                    "label":        acc.get("label", "unknown")
+                    "label":         acc.get("label", f"account_{i}"),
+                    "proxy":         get_next_proxy()  # Assigner proxy
                 })
             logger.info(f"[Pool] ✅ {len(ACCOUNT_POOL)} compte(s) chargé(s)")
             return
@@ -98,7 +178,8 @@ def init_account_pool():
             "username":      ROBLOX_USERNAME,
             "password":      ROBLOX_PASSWORD,
             "blocked_until": 0,
-            "label":         "default"
+            "label":         "default",
+            "proxy":         get_next_proxy()  # Assigner proxy
         })
         logger.info("[Pool] ✅ 1 compte (legacy single account)")
 
@@ -113,7 +194,7 @@ def get_available_account():
     best = min(ACCOUNT_POOL, key=lambda a: a["blocked_until"])
     wait = best["blocked_until"] - now
     logger.warning(f"[Pool] ⏳ Tous les {len(ACCOUNT_POOL)} comptes bloqués — attente {wait:.0f}s...")
-    time.sleep(wait + random.uniform(1, 3))
+    time.sleep(wait + random.uniform(2, 5))
     return best
 
 
@@ -122,17 +203,26 @@ def mark_account_blocked(acc, duration=120):
     logger.warning(f"[Pool] ⛔ Compte '{acc['label']}' bloqué pour {duration}s")
 
 
-def verify_cookie_validity(cookie):
+def verify_cookie_validity(cookie, proxy=None):
+    """Vérifie la validité du cookie et détecte les bans"""
     try:
+        proxies = {"https": proxy, "http": proxy} if proxy else None
         resp = requests.get(
             "https://users.roblox.com/v1/users/authenticated",
             headers={'Cookie': f'.ROBLOSECURITY={cookie}', 'User-Agent': 'Mozilla/5.0'},
-            timeout=5
+            timeout=5,
+            proxies=proxies
         )
         if resp.status_code == 200:
             data = resp.json()
             logger.info(f"[Cookie] ✅ {data.get('name')} ({data.get('id')})")
             return True
+        elif resp.status_code == 429:
+            logger.warning(f"[Cookie] ⚠️ HTTP 429 (Rate-limited)")
+            return "rate_limited"
+        elif resp.status_code in (403, 401):
+            logger.warning(f"[Cookie] ❌ HTTP {resp.status_code} (Invalid/Banned)")
+            return "invalid_or_banned"
         logger.warning(f"[Cookie] ⚠️ HTTP {resp.status_code}")
         return False
     except Exception as e:
@@ -153,10 +243,12 @@ def apply_payout_cooldown(account_label, cooldown_seconds=60):
 
 
 class RobloxPayout:
-    def __init__(self, roblosecurity, group_id, twofactor_secret=""):
+    def __init__(self, roblosecurity, group_id, twofactor_secret="", proxy=None):
         self.roblosecurity    = roblosecurity
         self.group_id         = group_id
         self.twofactor_secret = twofactor_secret
+        self.proxy            = proxy
+        self.proxies          = {"https": proxy, "http": proxy} if proxy else None
         self.headers = {
             'Cookie':     f'.ROBLOSECURITY={roblosecurity}',
             'User-Agent': 'Mozilla/5.0'
@@ -175,7 +267,8 @@ class RobloxPayout:
         try:
             r = requests.post(
                 "https://auth.roblox.com/v2/logout",
-                headers=self.headers, timeout=5, json={}
+                headers=self.headers, timeout=5, json={},
+                proxies=self.proxies
             )
             token = r.headers.get('X-CSRF-TOKEN') or r.headers.get('x-csrf-token')
             logger.info(f"[CSRF] logout HTTP {r.status_code} → {'✅ ' + token[:15] if token else '❌'}")
@@ -185,7 +278,8 @@ class RobloxPayout:
                 return True
             r2 = requests.post(
                 "https://auth.roblox.com/v1/authentication-ticket",
-                headers=self.headers, timeout=5, json={}
+                headers=self.headers, timeout=5, json={},
+                proxies=self.proxies
             )
             token = r2.headers.get('X-CSRF-TOKEN') or r2.headers.get('x-csrf-token')
             logger.info(f"[CSRF] auth-ticket HTTP {r2.status_code} → {'✅ ' + token[:15] if token else '❌'}")
@@ -200,8 +294,9 @@ class RobloxPayout:
             return False
 
     def _set_csrf(self):
-        if not verify_cookie_validity(self.roblosecurity):
-            logger.warning("[CSRF] Cookie invalide")
+        validity = verify_cookie_validity(self.roblosecurity, self.proxy)
+        if validity is not True:
+            logger.warning(f"[CSRF] Cookie invalide ou rate-limited: {validity}")
             return False
         return self._fetch_csrf()
 
@@ -213,7 +308,8 @@ class RobloxPayout:
             f"https://groups.roblox.com/v1/groups/{self.group_id}/payouts",
             headers=h,
             json={"PayoutType": 1, "Recipients": [{"amount": amount, "recipientId": user_id, "recipientType": 0}]},
-            timeout=10
+            timeout=10,
+            proxies=self.proxies
         )
 
     def _resolve_2fa_code(self, method_hint="authenticator"):
@@ -250,7 +346,8 @@ class RobloxPayout:
                 endpoint,
                 headers=self.headers,
                 json={"actionType": "Generic", "challengeId": challenge_id, "code": code},
-                timeout=10
+                timeout=10,
+                proxies=self.proxies
             )
             logger.info(f"[2FA] {resolved_method} verify → HTTP {r.status_code}")
             if r.status_code != 200:
@@ -264,7 +361,8 @@ class RobloxPayout:
                             email_endpoint,
                             headers=self.headers,
                             json={"actionType": "Generic", "challengeId": challenge_id, "code": imap_code},
-                            timeout=10
+                            timeout=10,
+                            proxies=self.proxies
                         )
                         logger.info(f"[2FA] IMAP fallback → HTTP {r2.status_code}")
                         if r2.status_code == 200:
@@ -292,7 +390,8 @@ class RobloxPayout:
                 "https://apis.roblox.com/challenge/v1/continue",
                 headers=self.headers,
                 json={"challengeId": challenge_id, "challengeType": challenge_type, "challengeMetadata": json.dumps(metadata)},
-                timeout=10
+                timeout=10,
+                proxies=self.proxies
             )
             logger.info(f"[Challenge] continue {challenge_type} → HTTP {resp.status_code}")
             return resp
@@ -435,6 +534,8 @@ class RobloxPayout:
 
 
 def transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts=None):
+    apply_global_payout_cooldown(DELAY_BETWEEN_PAYOUTS)
+    
     if tried_accounts is None:
         tried_accounts = set()
 
@@ -456,19 +557,22 @@ def transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts=None
         }
     
     tried_accounts.add(acc_key)
-    logger.info(f"[Pool] 🎯 Tentative avec '{acc_key}' ({len(tried_accounts)}/{len(ACCOUNT_POOL)})")
+    logger.info(f"[Pool] 🎯 Tentative avec '{acc_key}' ({len(tried_accounts)}/{len(ACCOUNT_POOL)}) — Proxy: {acc.get('proxy', 'NONE')}")
 
     cookie = acc["cookie"]
-    if not verify_cookie_validity(cookie):
-        logger.warning(f"[Pool] Cookie '{acc_key}' invalide → blocage 30min")
+    proxy = acc.get("proxy")
+    
+    validity = verify_cookie_validity(cookie, proxy)
+    if validity != True:
+        logger.warning(f"[Pool] Cookie '{acc_key}' invalide ({validity}) → blocage 1h")
         mark_account_blocked(acc, duration=ACCOUNT_BLOCK_DURATION_LONG)
-        time.sleep(random.uniform(3, 8))
+        time.sleep(random.uniform(5, 10))
         return transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts)
 
-    payout = RobloxPayout(cookie, GROUP_ID, acc["secret"])
+    payout = RobloxPayout(cookie, GROUP_ID, acc["secret"], proxy)
     
     def pool_blocksession_handler(user_id, amount, retry_count, max_retries):
-        logger.warning(f"[Pool] BlockSession détecté sur '{acc_key}' → blocage 10min + rotation")
+        logger.warning(f"[Pool] BlockSession détecté sur '{acc_key}' → blocage 30min + rotation")
         mark_account_blocked(acc, duration=ACCOUNT_BLOCK_DURATION_BLOCKSESSION)
         time.sleep(random.uniform(5, 10))
         return transfer_robux_cookie_pool(user_id, amount, tried_accounts)
@@ -478,7 +582,7 @@ def transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts=None
     success, detail = payout.payout(target_user_id, amount_robux)
     
     proof = {
-        "method": f"pool:{acc_key}",
+        "method": f"pool:{acc_key}:proxy:{proxy}",
         "endpoint": f"groups/{GROUP_ID}/payouts",
         "recipientId": target_user_id,
         "amountSent": amount_robux,
@@ -886,6 +990,7 @@ def health_check():
         "2fa_imap":  IMAP_AVAILABLE,
         "opencloud": bool(ROBLOX_API_KEY),
         "pool_size": len(ACCOUNT_POOL),
+        "proxies":   len(WORKING_PROXIES),
     }), 200
 
 
@@ -902,7 +1007,7 @@ def _admin_auth(req):
 def dashboard():
     if not _admin_auth(request):
         return "Access denied", 403
-    html = r"""<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>PolyVoice — Admin</title><link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"><style>:root {--bg: #0a0a0f; --surface: #111118; --border: #1e1e2e; --border-hi: #2a2a3e;--text: #e2e2f0; --muted: #6b6b8a; --accent: #7c6af7; --accent-glow: rgba(124,106,247,0.15);--green: #22d3a0; --green-bg: rgba(34,211,160,0.08);--yellow: #f5c842; --yellow-bg: rgba(245,200,66,0.08);--red: #f05a5a; --red-bg: rgba(240,90,90,0.08);--blue: #60a5fa;}* { margin:0; padding:0; box-sizing:border-box; }body { background:var(--bg); color:var(--text); font-family:'IBM Plex Sans',sans-serif; font-size:14px; min-height:100vh; }body::before {content:''; position:fixed; inset:0;background-image: linear-gradient(var(--border) 1px,transparent 1px), linear-gradient(90deg,var(--border) 1px,transparent 1px);background-size:40px 40px; opacity:0.4; pointer-events:none; z-index:0;}.wrap { position:relative; z-index:1; max-width:1300px; margin:0 auto; padding:28px 24px; }.topbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:32px; padding-bottom:20px; border-bottom:1px solid var(--border); }.logo { display:flex; align-items:center; gap:12px; }.logo-dot { width:10px; height:10px; background:var(--accent); border-radius:50%; box-shadow:0 0 10px var(--accent); animation:pulse 2s infinite; }@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }.logo-title { font-family:'IBM Plex Mono',monospace; font-size:16px; font-weight:600; letter-spacing:0.05em; }.logo-sub { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:0.1em; text-transform:uppercase; }.topbar-right { display:flex; align-items:center; gap:20px; }.live-badge { display:flex; align-items:center; gap:6px; background:var(--green-bg); border:1px solid rgba(34,211,160,0.2); padding:5px 12px; border-radius:20px; font-size:11px; color:var(--green); font-family:'IBM Plex Mono',monospace; }.live-dot { width:6px; height:6px; background:var(--green); border-radius:50%; animation:pulse 1.5s infinite; }.clock { font-family:'IBM Plex Mono',monospace; font-size:13px; color:var(--muted); }.db-badge { display:flex; align-items:center; gap:10px; background:rgba(124,106,247,0.06); border:1px solid rgba(124,106,247,0.2); border-radius:8px; padding:10px 16px; margin-bottom:24px; font-size:12px; font-family:'IBM Plex Mono',monospace; color:var(--muted); }.db-badge strong { color:var(--accent); }.stats-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:28px; }.stat-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:20px; position:relative; overflow:hidden; }.stat-card::before { content:''; position:absolute; top:0; left:0; right:0; height:2px; }.s-total::before { background:linear-gradient(90deg,var(--accent),transparent); }.s-pending::before { background:linear-gradient(90deg,var(--yellow),transparent); }.s-completed::before{ background:linear-gradient(90deg,var(--green),transparent); }.s-failed::before { background:linear-gradient(90deg,var(--red),transparent); }.stat-label { font-size:10px; text-transform:uppercase; letter-spacing:0.12em; color:var(--muted); margin-bottom:12px; font-family:'IBM Plex Mono',monospace; }.stat-value { font-size:38px; font-weight:600; font-family:'IBM Plex Mono',monospace; line-height:1; }.s-total .stat-value { color:var(--accent); }.s-pending .stat-value { color:var(--yellow); }.s-completed .stat-value{ color:var(--green); }.s-failed .stat-value { color:var(--red); }.toolbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }.toolbar-left { display:flex; align-items:center; gap:12px; }.section-title { font-family:'IBM Plex Mono',monospace; font-size:13px; font-weight:500; letter-spacing:0.05em; }.count-badge { background:var(--accent-glow); border:1px solid rgba(124,106,247,0.3); color:var(--accent); font-size:11px; font-family:'IBM Plex Mono',monospace; padding:2px 8px; border-radius:4px; }.btn-group { display:flex; gap:8px; }.btn { display:inline-flex; align-items:center; gap:6px; padding:7px 14px; border-radius:6px; font-size:12px; font-weight:500; cursor:pointer; border:1px solid transparent; transition:all 0.15s; }.btn-ghost { background:transparent; border-color:var(--border-hi); color:var(--muted); }.btn-ghost:hover { border-color:var(--text); color:var(--text); }.btn-green { background:var(--green-bg); border-color:rgba(34,211,160,0.3); color:var(--green); }.btn-green:hover { background:rgba(34,211,160,0.15); }.btn-red { background:var(--red-bg); border-color:rgba(240,90,90,0.3); color:var(--red); }.btn-red:hover { background:rgba(240,90,90,0.15); }.table-wrap { background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden; }table { width:100%; border-collapse:collapse; }thead tr { border-bottom:1px solid var(--border); background:rgba(255,255,255,0.02); }th { padding:11px 16px; text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); font-family:'IBM Plex Mono',monospace; }tbody tr { border-bottom:1px solid var(--border); transition:background 0.1s; }tbody tr:last-child { border-bottom:none; }tbody tr:hover { background:rgba(255,255,255,0.025); }td { padding:13px 16px; }.id-cell { font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--muted); }.name-cell { font-weight:500; }.amount-cell { font-family:'IBM Plex Mono',monospace; font-size:12px; }.amount-gross { color:var(--muted); }.amount-net { color:var(--green); font-weight:500; }.date-cell { font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--muted); }.badge { display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:4px; font-size:11px; font-weight:500; font-family:'IBM Plex Mono',monospace; }.badge::before { content:''; width:5px; height:5px; border-radius:50%; }.badge-pending { background:var(--yellow-bg); color:var(--yellow); border:1px solid rgba(245,200,66,0.2); }.badge-pending::before { background:var(--yellow); }.badge-completed { background:var(--green-bg); color:var(--green); border:1px solid rgba(34,211,160,0.2); }.badge-completed::before { background:var(--green); }.badge-failed { background:var(--red-bg); color:var(--red); border:1px solid rgba(240,90,90,0.2); }.badge-failed::before { background:var(--red); }.badge-requeue { background:rgba(96,165,250,0.08); color:var(--blue); border:1px solid rgba(96,165,250,0.2); }.badge-requeue::before { background:var(--blue); }.row-actions { display:flex; gap:6px; }.row-btn { padding:4px 10px; border-radius:4px; font-size:11px; font-family:'IBM Plex Mono',monospace; cursor:pointer; border:1px solid transparent; transition:all 0.12s; font-weight:500; }.row-btn-ok { background:var(--green-bg); border-color:rgba(34,211,160,0.25); color:var(--green); }.row-btn-ok:hover { background:rgba(34,211,160,0.18); }.row-btn-del { background:var(--red-bg); border-color:rgba(240,90,90,0.25); color:var(--red); }.row-btn-del:hover { background:rgba(240,90,90,0.18); }.empty-state { text-align:center; padding:60px 20px; color:var(--muted); font-family:'IBM Plex Mono',monospace; font-size:13px; }.spinner { display:inline-block; width:18px; height:18px; border:2px solid var(--border-hi); border-top-color:var(--accent); border-radius:50%; animation:spin 0.7s linear infinite; vertical-align:middle; margin-right:8px; }@keyframes spin { to { transform:rotate(360deg); } }.toast { position:fixed; bottom:24px; right:24px; padding:12px 20px; border-radius:8px; font-size:13px; font-family:'IBM Plex Mono',monospace; font-weight:500; pointer-events:none; z-index:9999; opacity:0; transform:translateY(8px); transition:all 0.2s; }.toast.show { opacity:1; transform:translateY(0); }.toast-success { background:var(--green-bg); border:1px solid rgba(34,211,160,0.3); color:var(--green); }.toast-error { background:var(--red-bg); border:1px solid rgba(240,90,90,0.3); color:var(--red); }@media(max-width:900px){ .stats-grid{grid-template-columns:repeat(2,1fr);} }@media(max-width:600px){ .stats-grid{grid-template-columns:1fr 1fr;} .topbar{flex-direction:column;gap:12px;} }</style></head><body><div class="wrap"><div class="topbar"><div class="logo"><div class="logo-dot"></div><div><div class="logo-title">POLYVOICE</div><div class="logo-sub">Donation Admin</div></div></div><div class="topbar-right"><div class="live-badge"><span class="live-dot"></span>LIVE</div><div class="clock" id="clock">--:--:--</div></div></div><div class="db-badge"><span>🗄</span><span>Base de données : <strong>Supabase / PostgreSQL</strong> &nbsp;|&nbsp; <span id="dbUrl">chargement...</span></span></div><div class="stats-grid"><div class="stat-card s-total"><div class="stat-label">Total</div><div class="stat-value" id="s-total">—</div></div><div class="stat-card s-pending"><div class="stat-label">En attente</div><div class="stat-value" id="s-pending">—</div></div><div class="stat-card s-completed"><div class="stat-label">Complétées</div><div class="stat-value" id="s-completed">—</div></div><div class="stat-card s-failed"><div class="stat-label">Échouées</div><div class="stat-value" id="s-failed">—</div></div></div><div class="toolbar"><div class="toolbar-left"><span class="section-title">DONATIONS</span><span class="count-badge" id="countBadge">0</span></div><div class="btn-group"><button class="btn btn-ghost" id="refreshBtn">↻ Refresh</button><button class="btn btn-green" id="completeAllBtn">✓ Tout compléter</button><button class="btn btn-red" id="deletePendingBtn">✕ Suppr. pending</button></div></div><div class="table-wrap"><table><thead><tr><th>#ID</th><th>Donateur</th><th>Receveur</th><th>Brut</th><th>Net</th><th>Statut</th><th>Date</th><th>Actions</th></tr></thead><tbody id="tableBody"><tr><td colspan="8" class="empty-state"><span class="spinner"></span>Chargement...</td></tr></tbody></table></div></div><div class="toast" id="toast"></div><script>(function(){var BASE=window.location.origin;var PWD=(function(){var pairs=window.location.search.substring(1).split('&');for(var i=0;i<pairs.length;i++){var kv=pairs[i].split('=');if(kv[0]==='password')return decodeURIComponent(kv[1]||'');}return '';})();function tickClock(){var n=new Date();document.getElementById('clock').textContent=n.getHours().toString().padStart(2,'0')+':'+n.getMinutes().toString().padStart(2,'0')+':'+n.getSeconds().toString().padStart(2,'0');}setInterval(tickClock,1000);tickClock();var toastTimer=null;function showToast(msg,isErr){var el=document.getElementById('toast');el.textContent=msg;el.className='toast show '+(isErr?'toast-error':'toast-success');clearTimeout(toastTimer);toastTimer=setTimeout(function(){el.className='toast';},3000);}function badgeClass(st){if(st==='pending')return 'badge-pending';if(st==='completed')return 'badge-completed';if(st==='failed')return 'badge-failed';if(st==='requeue')return 'badge-requeue';return 'badge-pending';}function fmtDate(str){if(!str)return '—';var d=new Date(str);if(isNaN(d.getTime()))return str;return d.getDate().toString().padStart(2,'0')+'/'+(d.getMonth()+1).toString().padStart(2,'0')+'/'+d.getFullYear()+' '+d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');}function loadStats(){fetch(BASE+'/admin/stats?password='+PWD).then(function(r){return r.json();}).then(function(d){document.getElementById('s-total').textContent=d.total!==undefined?d.total:'?';document.getElementById('s-pending').textContent=d.pending!==undefined?d.pending:'?';document.getElementById('s-completed').textContent=d.completed!==undefined?d.completed:'?';document.getElementById('s-failed').textContent=d.failed!==undefined?d.failed:'?';if(d.db_info)document.getElementById('dbUrl').textContent=d.db_info;}).catch(function(e){console.error('Stats:',e);});}function loadTable(){fetch(BASE+'/admin/donations?password='+PWD).then(function(r){return r.json();}).then(function(d){var tbody=document.getElementById('tableBody');var list=d.donations||[];document.getElementById('countBadge').textContent=list.length;if(list.length===0){tbody.innerHTML='<tr><td colspan="8" class="empty-state">/ / Aucune donation trouvée / /</td></tr>';return;}var rows='';for(var i=0;i<list.length;i++){var item=list[i];var st=item.status||'pending';rows+='<tr>';rows+='<td class="id-cell">#'+item.id+'</td>';rows+='<td class="name-cell">'+(item.donor_name||item.player_id)+'</td>';rows+='<td class="name-cell">'+(item.target_name||item.target_player_id)+'</td>';rows+='<td class="amount-cell amount-gross">'+item.amount_robux+' R$</td>';rows+='<td class="amount-cell amount-net">'+item.final_amount+' R$</td>';rows+='<td><span class="badge '+badgeClass(st)+'">'+st+'</span></td>';rows+='<td class="date-cell">'+fmtDate(item.created_at)+'</td>';rows+='<td><div class="row-actions">';rows+='<button class="row-btn row-btn-ok" data-id="'+item.id+'" onclick="markOK(this)">✓ OK</button>';rows+='<button class="row-btn row-btn-del" data-id="'+item.id+'" onclick="delRow(this)">✕ DEL</button>';rows+='</div></td></tr>';}tbody.innerHTML=rows;}).catch(function(){document.getElementById('tableBody').innerHTML='<tr><td colspan="8" class="empty-state">Erreur de chargement</td></tr>';});}window.markOK=function(btn){var id=btn.getAttribute('data-id');if(!confirm('Effectuer le vrai transfert Roblox pour la donation #'+id+' ?'))return;btn.disabled=true;btn.textContent='...';fetch(BASE+'/admin/donations/'+id+'/status?password='+PWD,{method:'POST',headers:{'Content-Type':'application/json'},body:'{"status":"completed","force_transfer":true}'}).then(function(r){return r.json();}).then(function(d){if(d.async)showToast('Transfert #'+id+' lancé en arrière-plan');else if(d.success)showToast('Statut mis à jour');else showToast('Echec #'+id+' — voir logs',true);loadTable();loadStats();}).catch(function(){showToast('Erreur réseau',true);btn.disabled=false;btn.textContent='✓ OK';});};window.delRow=function(btn){var id=btn.getAttribute('data-id');if(!confirm('Supprimer la donation #'+id+' ?'))return;fetch(BASE+'/admin/donations/'+id+'?password='+PWD,{method:'DELETE'}).then(function(){showToast('Supprimée #'+id);loadTable();loadStats();}).catch(function(){showToast('Erreur',true);});};document.getElementById('refreshBtn').onclick=function(){loadStats();loadTable();showToast('Données rechargées');};document.getElementById('completeAllBtn').onclick=function(){if(!confirm('Marquer TOUTES les pending comme completed ?'))return;fetch(BASE+'/admin/mark-completed?password='+PWD,{method:'POST'}).then(function(r){return r.json();}).then(function(d){showToast(d.updated+' donation(s) complétée(s)');loadTable();loadStats();}).catch(function(){showToast('Erreur',true);});};document.getElementById('deletePendingBtn').onclick=function(){if(!confirm('Supprimer TOUTES les donations pending ?'))return;fetch(BASE+'/admin/cleanup?password='+PWD,{method:'POST'}).then(function(r){return r.json();}).then(function(d){showToast(d.deleted+' supprimée(s)');loadTable();loadStats();}).catch(function(){showToast('Erreur',true);});};loadStats();loadTable();setInterval(function(){loadStats();loadTable();},20000);})();</script></body></html>"""
+    html = r"""<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>PolyVoice — Admin</title><link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"><style>:root {--bg: #0a0a0f; --surface: #111118; --border: #1e1e2e; --border-hi: #2a2a3e;--text: #e2e2f0; --muted: #6b6b8a; --accent: #7c6af7; --accent-glow: rgba(124,106,247,0.15);--green: #22d3a0; --green-bg: rgba(34,211,160,0.08);--yellow: #f5c842; --yellow-bg: rgba(245,200,66,0.08);--red: #f05a5a; --red-bg: rgba(240,90,90,0.08);--blue: #60a5fa;}* { margin:0; padding:0; box-sizing:border-box; }body { background:var(--bg); color:var(--text); font-family:'IBM Plex Sans',sans-serif; font-size:14px; min-height:100vh; }body::before {content:''; position:fixed; inset:0;background-image: linear-gradient(var(--border) 1px,transparent 1px), linear-gradient(90deg,var(--border) 1px,transparent 1px);background-size:40px 40px; opacity:0.4; pointer-events:none; z-index:0;}.wrap { position:relative; z-index:1; max-width:1300px; margin:0 auto; padding:28px 24px; }.topbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:32px; padding-bottom:20px; border-bottom:1px solid var(--border); }.logo { display:flex; align-items:center; gap:12px; }.logo-dot { width:10px; height:10px; background:var(--accent); border-radius:50%; box-shadow:0 0 10px var(--accent); animation:pulse 2s infinite; }@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }.logo-title { font-family:'IBM Plex Mono',monospace; font-size:16px; font-weight:600; letter-spacing:0.05em; }.logo-sub { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:0.1em; text-transform:uppercase; }.topbar-right { display:flex; align-items:center; gap:20px; }.live-badge { display:flex; align-items:center; gap:6px; background:var(--green-bg); border:1px solid rgba(34,211,160,0.2); padding:5px 12px; border-radius:20px; font-size:11px; color:var(--green); font-family:'IBM Plex Mono',monospace; }.live-dot { width:6px; height:6px; background:var(--green); border-radius:50%; animation:pulse 1.5s infinite; }.clock { font-family:'IBM Plex Mono',monospace; font-size:13px; color:var(--muted); }.db-badge { display:flex; align-items:center; gap:10px; background:rgba(124,106,247,0.06); border:1px solid rgba(124,106,247,0.2); border-radius:8px; padding:10px 16px; margin-bottom:24px; font-size:12px; font-family:'IBM Plex Mono',monospace; color:var(--muted); }.db-badge strong { color:var(--accent); }.stats-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:28px; }.stat-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:20px; position:relative; overflow:hidden; }.stat-card::before { content:''; position:absolute; top:0; left:0; right:0; height:2px; }.s-total::before { background:linear-gradient(90deg,var(--accent),transparent); }.s-pending::before { background:linear-gradient(90deg,var(--yellow),transparent); }.s-completed::before{ background:linear-gradient(90deg,var(--green),transparent); }.s-failed::before { background:linear-gradient(90deg,var(--red),transparent); }.stat-label { font-size:10px; text-transform:uppercase; letter-spacing:0.12em; color:var(--muted); margin-bottom:12px; font-family:'IBM Plex Mono',monospace; }.stat-value { font-size:38px; font-weight:600; font-family:'IBM Plex Mono',monospace; line-height:1; }.s-total .stat-value { color:var(--accent); }.s-pending .stat-value { color:var(--yellow); }.s-completed .stat-value{ color:var(--green); }.s-failed .stat-value { color:var(--red); }.toolbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }.toolbar-left { display:flex; align-items:center; gap:12px; }.section-title { font-family:'IBM Plex Mono',monospace; font-size:13px; font-weight:500; letter-spacing:0.05em; }.count-badge { background:var(--accent-glow); border:1px solid rgba(124,106,247,0.3); color:var(--accent); font-size:11px; font-family:'IBM Plex Mono',monospace; padding:2px 8px; border-radius:4px; }.btn-group { display:flex; gap:8px; }.btn { display:inline-flex; align-items:center; gap:6px; padding:7px 14px; border-radius:6px; font-size:12px; font-weight:500; cursor:pointer; border:1px solid transparent; transition:all 0.15s; }.btn-ghost { background:transparent; border-color:var(--border-hi); color:var(--muted); }.btn-ghost:hover { border-color:var(--text); color:var(--text); }.btn-green { background:var(--green-bg); border-color:rgba(34,211,160,0.3); color:var(--green); }.btn-green:hover { background:rgba(34,211,160,0.15); }.btn-red { background:var(--red-bg); border-color:rgba(240,90,90,0.3); color:var(--red); }.btn-red:hover { background:rgba(240,90,90,0.15); }.table-wrap { background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden; }table { width:100%; border-collapse:collapse; }thead tr { border-bottom:1px solid var(--border); background:rgba(255,255,255,0.02); }th { padding:11px 16px; text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); font-family:'IBM Plex Mono',monospace; }tbody tr { border-bottom:1px solid var(--border); transition:background 0.1s; }tbody tr:last-child { border-bottom:none; }tbody tr:hover { background:rgba(255,255,255,0.025); }td { padding:13px 16px; }.id-cell { font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--muted); }.name-cell { font-weight:500; }.amount-cell { font-family:'IBM Plex Mono',monospace; font-size:12px; }.amount-gross { color:var(--muted); }.amount-net { color:var(--green); font-weight:500; }.date-cell { font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--muted); }.badge { display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:4px; font-size:11px; font-weight:500; font-family:'IBM Plex Mono',monospace; }.badge::before { content:''; width:5px; height:5px; border-radius:50%; }.badge-pending { background:var(--yellow-bg); color:var(--yellow); border:1px solid rgba(245,200,66,0.2); }.badge-pending::before { background:var(--yellow); }.badge-completed { background:var(--green-bg); color:var(--green); border:1px solid rgba(34,211,160,0.2); }.badge-completed::before { background:var(--green); }.badge-failed { background:var(--red-bg); color:var(--red); border:1px solid rgba(240,90,90,0.2); }.badge-failed::before { background:var(--red); }.badge-requeue { background:rgba(96,165,250,0.08); color:var(--blue); border:1px solid rgba(96,165,250,0.2); }.badge-requeue::before { background:var(--blue); }.row-actions { display:flex; gap:6px; }.row-btn { padding:4px 10px; border-radius:4px; font-size:11px; font-family:'IBM Plex Mono',monospace; cursor:pointer; border:1px solid transparent; transition:all 0.12s; font-weight:500; }.row-btn-ok { background:var(--green-bg); border-color:rgba(34,211,160,0.25); color:var(--green); }.row-btn-ok:hover { background:rgba(34,211,160,0.18); }.row-btn-del { background:var(--red-bg); border-color:rgba(240,90,90,0.25); color:var(--red); }.row-btn-del:hover { background:rgba(240,90,90,0.18); }.empty-state { text-align:center; padding:60px 20px; color:var(--muted); font-family:'IBM Plex Mono',monospace; font-size:13px; }.spinner { display:inline-block; width:18px; height:18px; border:2px solid var(--border-hi); border-top-color:var(--accent); border-radius:50%; animation:spin 0.7s linear infinite; vertical-align:middle; margin-right:8px; }@keyframes spin { to { transform:rotate(360deg); } }.toast { position:fixed; bottom:24px; right:24px; padding:12px 20px; border-radius:8px; font-size:13px; font-family:'IBM Plex Mono',monospace; font-weight:500; pointer-events:none; z-index:9999; opacity:0; transform:translateY(8px); transition:all 0.2s; }.toast.show { opacity:1; transform:translateY(0); }.toast-success { background:var(--green-bg); border:1px solid rgba(34,211,160,0.3); color:var(--green); }.toast-error { background:var(--red-bg); border:1px solid rgba(240,90,90,0.3); color:var(--red); }@media(max-width:900px){ .stats-grid{grid-template-columns:repeat(2,1fr);} }@media(max-width:600px){ .stats-grid{grid-template-columns:1fr 1fr;} .topbar{flex-direction:column;gap:12px;} }</style></head><body><div class="wrap"><div class="topbar"><div class="logo"><div class="logo-dot"></div><div><div class="logo-title">POLYVOICE</div><div class="logo-sub">Donation Admin</div></div></div><div class="topbar-right"><div class="live-badge"><span class="live-dot"></span>LIVE</div><div class="clock" id="clock">--:--:--</div></div></div><div class="db-badge"><span>🗄</span><span>Base de données : <strong>Supabase / PostgreSQL</strong> &nbsp;|&nbsp; <span id="dbUrl">chargement...</span></span></div><div class="stats-grid"><div class="stat-card s-total"><div class="stat-label">Total</div><div class="stat-value" id="s-total">—</div></div><div class="stat-card s-pending"><div class="stat-label">En attente</div><div class="stat-value" id="s-pending">—</div></div><div class="stat-card s-completed"><div class="stat-label">Complétées</div><div class="stat-value" id="s-completed">—</div></div><div class="stat-card s-failed"><div class="stat-label">Échouées</div><div class="stat-value" id="s-failed">—</div></div></div><div class="toolbar"><div class="toolbar-left"><span class="section-title">DONATIONS</span><span class="count-badge" id="countBadge">0</span></div><div class="btn-group"><button class="btn btn-ghost" id="refreshBtn">↻ Refresh</button><button class="btn btn-green" id="completeAllBtn">✓ Tout compléter</button><button class="btn btn-red" id="deletePendingBtn">✕ Suppr. pending</button></div></div><div class="table-wrap"><table><thead><tr><th>#ID</th><th>Donateur</th><th>Receveur</th><th>Brut</th><th>Net</th><th>Statut</th><th>Date</th><th>Actions</th></tr></thead><tbody id="tableBody"><tr><td colspan="8" class="empty-state"><span class="spinner"></span>Chargement...</td></tr></tbody></table></div></div><div class="toast" id="toast"></div><script>(function(){var BASE=window.location.origin;var PWD=(function(){var pairs=window.location.search.substring(1).split('&');for(var i=0;i<pairs.length;i++){var kv=pairs[i].split('=');if(kv[0]==='password')return decodeURIComponent(kv[1]||'');}return '';})();function tickClock(){var n=new Date();document.getElementById('clock').textContent=n.getHours().toString().padStart(2,'0')+':'+n.getMinutes().toString().padStart(2,'0')+':'+n.getSeconds().toString().padStart(2,'0');}setInterval(tickClock,1000);tickClock();var toastTimer=null;function showToast(msg,isErr){var el=document.getElementById('toast');el.textContent=msg;el.className='toast show '+(isErr?'toast-error':'toast-success');clearTimeout(toastTimer);toastTimer=setTimeout(function(){el.className='toast';},3000);}function badgeClass(st){if(st==='pending')return 'badge-pending';if(st==='completed')return 'badge-completed';if(st==='failed')return 'badge-failed';if(st==='requeue')return 'badge-requeue';return 'badge-pending';}function fmtDate(str){if(!str)return '—';var d=new Date(str);if(isNaN(d.getTime()))return str;return d.getDate().toString().padStart(2,'0')+'/'+(d.getMonth()+1).toString().padStart(2,'0')+'/'+d.getFullYear()+' '+d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');}function loadStats(){fetch(BASE+'/admin/stats?password='+PWD).then(function(r){return r.json();}).then(function(d){document.getElementById('s-total').textContent=d.total!==undefined?d.total:'?';document.getElementById('s-pending').textContent=d.pending!==undefined?d.pending:'?';document.getElementById('s-completed').textContent=d.completed!==undefined?d.completed:'?';document.getElementById('s-failed').textContent=d.failed!==undefined?d.failed:'?';if(d.db_info)document.getElementById('dbUrl').textContent=d.db_info;}).catch(function(e){console.error('Stats:',e);});}function loadTable(){fetch(BASE+'/admin/donations?password='+PWD).then(function(r){return r.json();}).then(function(d){var tbody=document.getElementById('tableBody');var list=d.donations||[];document.getElementById('countBadge').textContent=list.length;if(list.length===0){tbody.innerHTML='<tr><td colspan="8" class="empty-state">/ / Aucune donation trouvée / /</td></tr>';return;}var rows='';for(var i=0;i<list.length;i++){var item=list[i];var st=item.status||'pending';rows+='<tr>';rows+='<td class="id-cell">#'+item.id+'</td>';rows+='<td class="name-cell">'+(item.donor_name||item.player_id)+'</td>';rows+='<td class="name-cell">'+(item.target_name||item.target_player_id)+'</td>';rows+='<td class="amount-cell amount-gross">'+item.amount_robux+' R$</td>';rows+='<td class="amount-cell amount-net">'+item.final_amount+' R$</td>';rows+='<td><span class="badge '+badgeClass(st)+'">'+st+'</span></td>';rows+='<td class="date-cell">'+fmtDate(item.created_at)+'</td>';rows+='<td><div class="row-actions">';rows+='<button class="btn row-btn-ok" data-id="'+item.id+'" onclick="markOK(this)">✓ OK</button>';rows+='<button class="btn row-btn-del" data-id="'+item.id+'" onclick="delRow(this)">✕ DEL</button>';rows+='</div></td></tr>';}tbody.innerHTML=rows;}).catch(function(){document.getElementById('tableBody').innerHTML='<tr><td colspan="8" class="empty-state">Erreur de chargement</td></tr>';});}window.markOK=function(btn){var id=btn.getAttribute('data-id');if(!confirm('Effectuer le vrai transfert Roblox pour la donation #'+id+' ?'))return;btn.disabled=true;btn.textContent='...';fetch(BASE+'/admin/donations/'+id+'/status?password='+PWD,{method:'POST',headers:{'Content-Type':'application/json'},body:'{"status":"completed","force_transfer":true}'}).then(function(r){return r.json();}).then(function(d){if(d.async)showToast('Transfert #'+id+' lancé en arrière-plan');else if(d.success)showToast('Statut mis à jour');else showToast('Echec #'+id+' — voir logs',true);loadTable();loadStats();}).catch(function(){showToast('Erreur réseau',true);btn.disabled=false;btn.textContent='✓ OK';});};window.delRow=function(btn){var id=btn.getAttribute('data-id');if(!confirm('Supprimer la donation #'+id+' ?'))return;fetch(BASE+'/admin/donations/'+id+'?password='+PWD,{method:'DELETE'}).then(function(){showToast('Supprimée #'+id);loadTable();loadStats();}).catch(function(){showToast('Erreur',true);});};document.getElementById('refreshBtn').onclick=function(){loadStats();loadTable();showToast('Données rechargées');};document.getElementById('completeAllBtn').onclick=function(){if(!confirm('Marquer TOUTES les pending comme completed ?'))return;fetch(BASE+'/admin/mark-completed?password='+PWD,{method:'POST'}).then(function(r){return r.json();}).then(function(d){showToast(d.updated+' donation(s) complétée(s)');loadTable();loadStats();}).catch(function(){showToast('Erreur',true);});};document.getElementById('deletePendingBtn').onclick=function(){if(!confirm('Supprimer TOUTES les donations pending ?'))return;fetch(BASE+'/admin/cleanup?password='+PWD,{method:'POST'}).then(function(r){return r.json();}).then(function(d){showToast(d.deleted+' supprimée(s)');loadTable();loadStats();}).catch(function(){showToast('Erreur',true);});};loadStats();loadTable();setInterval(function(){loadStats();loadTable();},20000);})();</script></body></html>"""
     return html
 
 
@@ -1062,6 +1167,7 @@ def admin_mark_completed():
         return jsonify({"error": str(e)}), 500
 
 
+init_proxies()
 init_account_pool()
 
 if DATABASE_URL:
@@ -1078,6 +1184,7 @@ logger.info(f"🍪 Pool:      {'✅ ' + str(len(ACCOUNT_POOL)) if ACCOUNT_POOL e
 logger.info(f"🔐 TOTP:      {'✅' if ROBLOX_2FA_SECRET and PYOTP_AVAILABLE else '❌'}")
 logger.info(f"📧 IMAP 2FA:  {'✅' if IMAP_AVAILABLE else '❌'}")
 logger.info(f"⚡ Threads:   {payout_executor._max_workers}")
+logger.info(f"🌐 Proxies:   {'✅ ' + str(len(WORKING_PROXIES)) if WORKING_PROXIES else '❌'}")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False, use_reloader=False)
