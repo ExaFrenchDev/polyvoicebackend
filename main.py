@@ -58,10 +58,14 @@ TAX_RATE              = 0.60
 WAIT_DAYS             = 7
 MIN_GROUP_TENURE_DAYS = 7
 
-DELAY_AFTER_CSRF    = 2.0
-DELAY_AFTER_2FA     = 10.0
-DELAY_BEFORE_FINAL  = 10.0
-DELAY_BLOCKSESSION  = 15.0
+DELAY_AFTER_CSRF    = 5.0
+DELAY_AFTER_2FA     = 15.0
+DELAY_BEFORE_FINAL  = 15.0
+DELAY_BLOCKSESSION  = 120.0
+
+ACCOUNT_BLOCK_DURATION_SHORT = 180
+ACCOUNT_BLOCK_DURATION_LONG = 1800
+ACCOUNT_BLOCK_DURATION_BLOCKSESSION = 600
 
 cookie_lock     = threading.Lock()
 payout_executor = ThreadPoolExecutor(max_workers=3)
@@ -108,125 +112,14 @@ def get_available_account():
             return acc
     best = min(ACCOUNT_POOL, key=lambda a: a["blocked_until"])
     wait = best["blocked_until"] - now
-    logger.warning(f"[Pool] Tous les comptes bloqués — attente {wait:.0f}s sur '{best['label']}'")
-    time.sleep(wait + 1)
+    logger.warning(f"[Pool] ⏳ Tous les {len(ACCOUNT_POOL)} comptes bloqués — attente {wait:.0f}s...")
+    time.sleep(wait + random.uniform(1, 3))
     return best
 
 
 def mark_account_blocked(acc, duration=120):
     acc["blocked_until"] = time.time() + duration
     logger.warning(f"[Pool] ⛔ Compte '{acc['label']}' bloqué pour {duration}s")
-
-
-def reauthenticate_account(account, retry_count=0, max_retries=3):
-    username = account.get("username", "")
-    password = account.get("password", "")
-
-    if not username or not password:
-        logger.warning(f"[Reauth] ⚠️ Pas d'identifiants pour '{account['label']}' — fallback globals")
-        username = ROBLOX_USERNAME
-        password = ROBLOX_PASSWORD
-        if not username or not password:
-            logger.error(f"[Reauth] ❌ Aucun identifiant disponible pour '{account['label']}'")
-            return None
-
-    if retry_count > 0:
-        delay = min(5 * (2 ** (retry_count - 1)), 60)
-        jitter = random.uniform(0, 5)
-        total_delay = delay + jitter
-        logger.warning(f"[Reauth] ⏳ Attente {total_delay:.1f}s avant retry (tentative {retry_count+1})...")
-        time.sleep(total_delay)
-
-    try:
-        user_agents = [
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1",
-        ]
-        ua = user_agents[retry_count % len(user_agents)]
-
-        logger.info(f"[Reauth] 🔄 Login {username} ('{account['label']}')... (tentative {retry_count+1}/{max_retries+1})")
-        session = requests.Session()
-
-        pre = session.post(
-            "https://auth.roblox.com/v2/logout",
-            headers={"User-Agent": ua},
-            timeout=5, json={}
-        )
-        csrf = pre.headers.get('X-CSRF-TOKEN') or pre.headers.get('x-csrf-token', '')
-
-        headers = {"User-Agent": ua, "Content-Type": "application/json"}
-        if csrf:
-            headers["X-CSRF-TOKEN"] = csrf
-
-        resp = session.post(
-            "https://auth.roblox.com/v2/login",
-            json={"ctype": "Username", "cvalue": username, "passwd": password},
-            headers=headers, timeout=10
-        )
-        logger.info(f"[Reauth] HTTP {resp.status_code}")
-
-        if resp.status_code == 200:
-            new_cookie = session.cookies.get('.ROBLOSECURITY')
-            if new_cookie:
-                logger.info(f"[Reauth] ✅ Nouveau cookie pour '{account['label']}': {new_cookie[:30]}...")
-                account["cookie"] = new_cookie
-                return new_cookie
-            logger.error("[Reauth] ❌ Pas de .ROBLOSECURITY dans les cookies")
-            return None
-
-        elif resp.status_code == 403:
-            new_csrf = resp.headers.get('X-CSRF-TOKEN') or resp.headers.get('x-csrf-token')
-            if new_csrf:
-                logger.info(f"[Reauth] Nouveau CSRF après 403, retry...")
-                headers["X-CSRF-TOKEN"] = new_csrf
-                resp2 = session.post(
-                    "https://auth.roblox.com/v2/login",
-                    json={"ctype": "Username", "cvalue": username, "passwd": password},
-                    headers=headers, timeout=10
-                )
-                logger.info(f"[Reauth] Login retry HTTP {resp2.status_code}")
-                if resp2.status_code == 200:
-                    new_cookie = session.cookies.get('.ROBLOSECURITY')
-                    if new_cookie:
-                        logger.info(f"[Reauth] ✅ Cookie obtenu (retry): {new_cookie[:30]}...")
-                        account["cookie"] = new_cookie
-                        return new_cookie
-
-            if retry_count < max_retries:
-                logger.warning(f"[Reauth] 403 persistent — retry {retry_count+1}/{max_retries}")
-                return reauthenticate_account(account, retry_count + 1, max_retries)
-            else:
-                logger.error(f"[Reauth] ❌ Max retries atteint pour '{account['label']}'.")
-                return None
-
-        else:
-            logger.error(f"[Reauth] ❌ HTTP {resp.status_code}: {resp.text[:200]}")
-            if retry_count < max_retries:
-                return reauthenticate_account(account, retry_count + 1, max_retries)
-            return None
-
-    except Exception as e:
-        logger.error(f"[Reauth] ❌ Exception: {e}")
-        if retry_count < max_retries:
-            return reauthenticate_account(account, retry_count + 1, max_retries)
-        return None
-
-
-def reauthenticate_roblox(retry_count=0, max_retries=3):
-    default_acc = {
-        "label":    "global",
-        "username": ROBLOX_USERNAME,
-        "password": ROBLOX_PASSWORD,
-        "cookie":   ACCOUNT_COOKIE,
-        "secret":   ROBLOX_2FA_SECRET,
-    }
-    new_cookie = reauthenticate_account(default_acc, retry_count, max_retries)
-    if new_cookie:
-        os.environ['ROBLOX_ACCOUNT_COOKIE'] = new_cookie
-        globals()['ACCOUNT_COOKIE'] = new_cookie
-    return new_cookie
 
 
 def verify_cookie_validity(cookie):
@@ -247,22 +140,14 @@ def verify_cookie_validity(cookie):
         return False
 
 
-def get_valid_cookie():
-    current = globals().get('ACCOUNT_COOKIE', '')
-    if current and verify_cookie_validity(current):
-        return current
-    logger.warning("[Cookie] Réauth automatique...")
-    return reauthenticate_roblox()
-
-
 PAYOUT_COOLDOWN = {}
 
-def apply_payout_cooldown(account_label, cooldown_seconds=30):
+def apply_payout_cooldown(account_label, cooldown_seconds=60):
     now = time.time()
     last = PAYOUT_COOLDOWN.get(account_label, 0)
     if now - last < cooldown_seconds:
         wait = cooldown_seconds - (now - last)
-        logger.info(f"[Cooldown] Attente {wait:.1f}s avant payout sur '{account_label}'...")
+        logger.info(f"[Cooldown] Attente {wait:.1f}s avant payout...")
         time.sleep(wait)
     PAYOUT_COOLDOWN[account_label] = time.time()
 
@@ -316,21 +201,8 @@ class RobloxPayout:
 
     def _set_csrf(self):
         if not verify_cookie_validity(self.roblosecurity):
-            new_cookie = reauthenticate_roblox(0, 3)
-            if not new_cookie:
-                return False
-            self.roblosecurity = new_cookie
-            self.headers['Cookie'] = f'.ROBLOSECURITY={new_cookie}'
-        return self._fetch_csrf()
-
-    def _refresh_cookie_and_csrf(self):
-        logger.info("[Refresh] Force réauth + CSRF...")
-        new_cookie = reauthenticate_roblox(0, 3)
-        if not new_cookie:
+            logger.warning("[CSRF] Cookie invalide")
             return False
-        self.roblosecurity = new_cookie
-        self.headers['Cookie'] = f'.ROBLOSECURITY={new_cookie}'
-        self.headers.pop('X-CSRF-TOKEN', None)
         return self._fetch_csrf()
 
     def _payout_request(self, user_id, amount, extra_headers=None):
@@ -352,7 +224,7 @@ class RobloxPayout:
                 return code, "authenticator"
 
         if IMAP_AVAILABLE:
-            logger.info(f"[2FA] 📧 Pas de TOTP disponible — tentative IMAP (method={method_hint})...")
+            logger.info(f"[2FA] 📧 Tentative IMAP...")
             code = fetch_roblox_email_code(timeout=60, poll_interval=5)
             if code:
                 logger.info(f"[2FA] ✅ Code IMAP: {code}")
@@ -360,7 +232,7 @@ class RobloxPayout:
         else:
             logger.warning("[2FA] Module IMAP non disponible")
 
-        logger.error("[2FA] ❌ Aucun code disponible (ni TOTP ni IMAP)")
+        logger.error("[2FA] ❌ Aucun code disponible")
         return None, None
 
     def _verify_2fa(self, sender_id, challenge_id, method_hint="authenticator"):
@@ -384,7 +256,7 @@ class RobloxPayout:
             if r.status_code != 200:
                 logger.error(f"[2FA] ❌ {r.text[:200]}")
                 if resolved_method == "authenticator" and IMAP_AVAILABLE:
-                    logger.info("[2FA] 🔄 Authenticator échoué → tentative IMAP fallback...")
+                    logger.info("[2FA] 🔄 Fallback IMAP...")
                     imap_code = fetch_roblox_email_code(timeout=60, poll_interval=5)
                     if imap_code:
                         email_endpoint = f"https://twostepverification.roblox.com/v1/users/{sender_id}/challenges/email/verify"
@@ -414,9 +286,6 @@ class RobloxPayout:
             logger.error(f"[2FA] ❌ Exception: {e}")
             return None
 
-    def _verify_totp(self, sender_id, challenge_id):
-        return self._verify_2fa(sender_id, challenge_id, method_hint="authenticator")
-
     def _continue_challenge(self, challenge_id, challenge_type, metadata):
         try:
             resp = requests.post(
@@ -433,29 +302,23 @@ class RobloxPayout:
 
     def _handle_blocksession(self, user_id, amount, retry_count, max_retries):
         if retry_count >= max_retries:
-            return False, "Session bloquée — max retries atteint"
-        wait = min(DELAY_BLOCKSESSION * (2 ** retry_count), 180)
-        logger.warning(f"[BlockSession] Attente {wait:.0f}s (tentative {retry_count+1})...")
+            return False, "BlockSession: max retries"
+        wait = DELAY_BLOCKSESSION * (2 ** retry_count)
+        logger.warning(f"[BlockSession] ⏳ Attente {wait:.0f}s...")
         time.sleep(wait)
-        if verify_cookie_validity(self.roblosecurity):
-            logger.info("[BlockSession] Cookie encore valide, juste refresh CSRF...")
-            self.headers.pop('X-CSRF-TOKEN', None)
-            if self._fetch_csrf():
-                return self.payout(user_id, amount, retry_count + 1, max_retries)
-        if not self._refresh_cookie_and_csrf():
-            return False, "Réauth échouée après blocksession"
-        return self.payout(user_id, amount, retry_count + 1, max_retries)
+        return False, "BlockSession — rotation pool requise"
 
-    def payout(self, user_id, amount, retry_count=0, max_retries=3):
+    def payout(self, user_id, amount, retry_count=0, max_retries=2):
         if retry_count == 0:
             if not self._set_csrf():
-                return False, "Cookie invalide ou expiré"
+                logger.warning(f"[Payout] Cookie invalide ou CSRF échoué")
+                return False, "Cookie invalide / CSRF échoué"
 
         logger.info(f"[Payout] tentative {retry_count+1}/{max_retries+1}: {amount} R$ → {user_id}")
         r = self._payout_request(user_id, amount)
 
         if r.status_code == 200:
-            logger.info("✅ [Payout] Réussi!")
+            logger.info(f"✅ [Payout] Réussi!")
             return True, "ok"
 
         challenge_type     = r.headers.get("rblx-challenge-type", "").lower()
@@ -463,143 +326,112 @@ class RobloxPayout:
         challenge_meta_b64 = r.headers.get("rblx-challenge-metadata", "")
 
         if not challenge_type or not challenge_id:
-            logger.error(f"[Payout] ❌ Pas de challenge headers — HTTP {r.status_code}: {r.text[:200]}")
-            if r.status_code == 403 and retry_count < max_retries:
-                logger.warning("[Payout] 403 sans challenge → réauth + retry")
-                new_cookie = reauthenticate_roblox(0, 3)
-                if new_cookie:
-                    self.roblosecurity = new_cookie
-                    self.headers['Cookie'] = f'.ROBLOSECURITY={new_cookie}'
-                    self.headers.pop('X-CSRF-TOKEN', None)
-                    if self._fetch_csrf():
-                        return self.payout(user_id, amount, retry_count + 1, max_retries)
-            return False, f"No challenge headers (HTTP {r.status_code})"
+            logger.error(f"[Payout] ❌ HTTP {r.status_code} — pas de challenge → abandon")
+            return False, f"HTTP {r.status_code}: {r.text[:100]}"
+
+        if challenge_type == "blocksession":
+            logger.warning("[Payout] ⚠️ BlockSession détecté!")
+            return self._handle_blocksession(user_id, amount, retry_count, max_retries)
 
         if challenge_type == "chef":
             logger.info("[Chef] 👨‍🍳 Challenge")
             try:
                 chef_meta = json.loads(base64.b64decode(challenge_meta_b64))
             except Exception as e:
-                return False, f"Chef metadata decode failed: {e}"
+                logger.error(f"[Chef] Metadata decode failed: {e}")
+                return False, f"Chef metadata error"
 
             cont = self._continue_challenge(challenge_id, "chef", chef_meta)
             if not cont:
                 return False, "Chef continue failed"
 
-            cont_data     = cont.json()
-            next_type     = cont_data.get("challengeType", "")
-            next_meta_raw = cont_data.get("challengeMetadata", "")
+            cont_data = cont.json()
+            next_type = cont_data.get("challengeType", "")
 
             if next_type == "":
-                logger.info("[Chef] ✅ Pas de 2FA")
+                logger.info("[Chef] ✅ Pas de 2FA requis")
                 time.sleep(DELAY_BEFORE_FINAL)
                 final = self._payout_request(user_id, amount, {
-                    "rblx-challenge-id":       challenge_id,
-                    "rblx-challenge-type":     "chef",
+                    "rblx-challenge-id": challenge_id,
+                    "rblx-challenge-type": "chef",
                     "rblx-challenge-metadata": challenge_meta_b64
                 })
+                return final.status_code == 200, final.text
 
             elif next_type == "twostepverification":
                 logger.info("[Chef] 🔐 2FA requis")
                 try:
-                    tfa_meta   = json.loads(next_meta_raw)
-                    tfa_user   = tfa_meta["userId"]
-                    tfa_cid    = tfa_meta["challengeId"]
+                    tfa_meta = json.loads(cont_data.get("challengeMetadata", "{}"))
+                    tfa_user = tfa_meta["userId"]
+                    tfa_cid = tfa_meta["challengeId"]
                     tfa_method = tfa_meta.get("mediaType", "authenticator").lower()
-                except Exception:
-                    return False, "2FA metadata parse failed"
+                except Exception as e:
+                    logger.error(f"[Chef] 2FA metadata: {e}")
+                    return False, "2FA metadata error"
 
                 vtoken = self._verify_2fa(tfa_user, tfa_cid, method_hint=tfa_method)
                 if not vtoken:
-                    return False, "2FA failed (TOTP + IMAP)"
+                    logger.error("[Chef] 2FA verification failed")
+                    return False, "2FA verification failed"
 
                 time.sleep(DELAY_AFTER_2FA)
                 cont2 = self._continue_challenge(challenge_id, "twostepverification", {
                     "verificationToken": vtoken,
-                    "rememberDevice":    False,
-                    "userId":            tfa_user,
-                    "challengeId":       tfa_cid,
+                    "rememberDevice": False,
+                    "userId": tfa_user,
+                    "challengeId": tfa_cid,
                 })
+                
                 if not cont2 or cont2.status_code >= 400:
                     return False, "2FA continue failed"
+                
                 if cont2.json().get("challengeType") == "blocksession":
                     return self._handle_blocksession(user_id, amount, retry_count, max_retries)
 
                 time.sleep(DELAY_BEFORE_FINAL)
                 final = self._payout_request(user_id, amount)
+                return final.status_code == 200, final.text
 
             elif next_type == "blocksession":
                 return self._handle_blocksession(user_id, amount, retry_count, max_retries)
             else:
-                return False, f"Unknown next challenge: {next_type}"
-
-            if final.status_code == 200:
-                logger.info("✅ [Chef] Payout réussi!")
-                return True, "ok"
-            logger.error(f"❌ [Chef] {final.text[:200]}")
-            return False, final.text
+                return False, f"Unknown challenge: {next_type}"
 
         elif challenge_type == "twostepverification":
             logger.info("[2FA] 🔐 Challenge direct")
             try:
-                meta       = json.loads(base64.b64decode(challenge_meta_b64))
-                sender     = meta["userId"]
-                cid        = meta["challengeId"]
+                meta = json.loads(base64.b64decode(challenge_meta_b64))
+                sender = meta["userId"]
+                cid = meta["challengeId"]
                 tfa_method = meta.get("mediaType", "authenticator").lower()
-            except Exception:
-                return False, "2FA metadata parse failed"
+            except Exception as e:
+                logger.error(f"[2FA] Metadata: {e}")
+                return False, "2FA metadata error"
 
             vtoken = self._verify_2fa(sender, cid, method_hint=tfa_method)
             if not vtoken:
-                return False, "2FA failed (TOTP + IMAP)"
+                return False, "2FA verification failed"
 
             time.sleep(DELAY_AFTER_2FA)
             cont2 = self._continue_challenge(challenge_id, "twostepverification", {
                 "verificationToken": vtoken,
-                "rememberDevice":    False,
-                "userId":            sender,
-                "challengeId":       cid,
+                "rememberDevice": False,
+                "userId": sender,
+                "challengeId": cid,
             })
+            
             if not cont2 or cont2.status_code >= 400:
                 return False, "2FA continue failed"
+            
             if cont2.json().get("challengeType") == "blocksession":
                 return self._handle_blocksession(user_id, amount, retry_count, max_retries)
 
             time.sleep(DELAY_BEFORE_FINAL)
             final = self._payout_request(user_id, amount)
-            if final.status_code == 200:
-                return True, "ok"
-            return False, final.text
-
-        elif challenge_type == "blocksession":
-            return self._handle_blocksession(user_id, amount, retry_count, max_retries)
+            return final.status_code == 200, final.text
+        
         else:
-            return False, f"Unknown challenge: {challenge_type}"
-
-
-def transfer_robux_opencloud(target_user_id, amount_robux):
-    try:
-        response = requests.post(
-            f"https://apis.roblox.com/cloud/v2/groups/{GROUP_ID}/payouts",
-            json={"payouts": [{"userId": str(target_user_id), "amount": amount_robux}]},
-            headers={"x-api-key": ROBLOX_API_KEY, "Content-Type": "application/json"},
-            timeout=10
-        )
-        proof = {
-            "method":      "open_cloud",
-            "recipientId": target_user_id,
-            "amountSent":  amount_robux,
-            "httpStatus":  response.status_code,
-            "response":    response.json() if response.content else {},
-            "timestamp":   datetime.utcnow().isoformat() + "Z"
-        }
-        if response.status_code == 200:
-            logger.info(f"✅ [OpenCloud] {amount_robux} R$ → {target_user_id}")
-            return True, proof
-        logger.error(f"❌ [OpenCloud] HTTP {response.status_code}")
-        return False, proof
-    except Exception as e:
-        return False, {"error": str(e), "timestamp": datetime.utcnow().isoformat() + "Z"}
+            return False, f"Unknown challenge type: {challenge_type}"
 
 
 def transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts=None):
@@ -608,57 +440,65 @@ def transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts=None
 
     acc = get_available_account()
     if not acc:
-        return False, {"error": "Aucun compte disponible", "timestamp": datetime.utcnow().isoformat() + "Z"}
+        logger.error("[Pool] ❌ Aucun compte disponible — tous bloqués")
+        return False, {
+            "error": "Tous les comptes sont bloqués. Attendre quelques minutes.",
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
 
     acc_key = acc["label"]
-
+    
     if acc_key in tried_accounts:
-        return False, {"error": "Tous les comptes ont échoué", "timestamp": datetime.utcnow().isoformat() + "Z"}
+        logger.error(f"[Pool] ❌ Tous les {len(ACCOUNT_POOL)} comptes ont échoué")
+        return False, {
+            "error": "Tous les comptes du pool ont échoué",
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+    
     tried_accounts.add(acc_key)
-
-    apply_payout_cooldown(acc_key, cooldown_seconds=20)
+    logger.info(f"[Pool] 🎯 Tentative avec '{acc_key}' ({len(tried_accounts)}/{len(ACCOUNT_POOL)})")
 
     cookie = acc["cookie"]
     if not verify_cookie_validity(cookie):
-        logger.warning(f"[Pool] Cookie '{acc_key}' invalide, tentative réauth...")
-        new_cookie = reauthenticate_account(acc, 0, 3)
-        if new_cookie:
-            cookie = new_cookie
-        else:
-            mark_account_blocked(acc, duration=600)
-            logger.warning(f"[Pool] Réauth échouée → rotation")
-            return transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts)
+        logger.warning(f"[Pool] Cookie '{acc_key}' invalide → blocage 30min")
+        mark_account_blocked(acc, duration=ACCOUNT_BLOCK_DURATION_LONG)
+        time.sleep(random.uniform(3, 8))
+        return transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts)
 
     payout = RobloxPayout(cookie, GROUP_ID, acc["secret"])
-
-    def pool_handle_blocksession(user_id, amount, retry_count, max_retries):
-        logger.warning(f"[Pool] BlockSession sur '{acc_key}' → rotation")
-        mark_account_blocked(acc, duration=120)
-        time.sleep(random.uniform(5, 15))
+    
+    def pool_blocksession_handler(user_id, amount, retry_count, max_retries):
+        logger.warning(f"[Pool] BlockSession détecté sur '{acc_key}' → blocage 10min + rotation")
+        mark_account_blocked(acc, duration=ACCOUNT_BLOCK_DURATION_BLOCKSESSION)
+        time.sleep(random.uniform(5, 10))
         return transfer_robux_cookie_pool(user_id, amount, tried_accounts)
-
-    payout._handle_blocksession = pool_handle_blocksession
+    
+    payout._handle_blocksession = pool_blocksession_handler
 
     success, detail = payout.payout(target_user_id, amount_robux)
+    
     proof = {
-        "method":      f"pool:{acc_key}",
-        "endpoint":    f"groups/{GROUP_ID}/payouts",
+        "method": f"pool:{acc_key}",
+        "endpoint": f"groups/{GROUP_ID}/payouts",
         "recipientId": target_user_id,
-        "amountSent":  amount_robux,
-        "httpStatus":  200 if success else 403,
-        "response":    {"detail": detail},
-        "timestamp":   datetime.utcnow().isoformat() + "Z"
+        "amountSent": amount_robux,
+        "httpStatus": 200 if success else 403,
+        "response": {"detail": detail},
+        "timestamp": datetime.utcnow().isoformat() + "Z"
     }
-    return success, proof
+    
+    if success:
+        logger.info(f"✅ [Pool] Payout réussi avec '{acc_key}'")
+        return True, proof
+    
+    logger.error(f"❌ [Pool] Payout échoué avec '{acc_key}': {detail}")
+    mark_account_blocked(acc, duration=ACCOUNT_BLOCK_DURATION_SHORT)
+    time.sleep(random.uniform(5, 15))
+    
+    return transfer_robux_cookie_pool(target_user_id, amount_robux, tried_accounts)
 
 
 def transfer_robux(target_user_id, amount_robux):
-    if ROBLOX_API_KEY:
-        success, proof = transfer_robux_opencloud(target_user_id, amount_robux)
-        if success:
-            return True, proof
-        logger.warning("[Payout] OpenCloud échoué → fallback Pool")
-
     if ACCOUNT_POOL:
         return transfer_robux_cookie_pool(target_user_id, amount_robux)
 
@@ -1046,7 +886,6 @@ def health_check():
         "2fa_imap":  IMAP_AVAILABLE,
         "opencloud": bool(ROBLOX_API_KEY),
         "pool_size": len(ACCOUNT_POOL),
-        "reauth":    bool(ROBLOX_USERNAME and ROBLOX_PASSWORD),
     }), 200
 
 
@@ -1238,7 +1077,6 @@ logger.info(f"🔑 API Key:   {'✅' if ROBLOX_API_KEY else '❌'}")
 logger.info(f"🍪 Pool:      {'✅ ' + str(len(ACCOUNT_POOL)) if ACCOUNT_POOL else '❌'}")
 logger.info(f"🔐 TOTP:      {'✅' if ROBLOX_2FA_SECRET and PYOTP_AVAILABLE else '❌'}")
 logger.info(f"📧 IMAP 2FA:  {'✅' if IMAP_AVAILABLE else '❌'}")
-logger.info(f"🔄 Réauth:    {'✅' if ROBLOX_USERNAME and ROBLOX_PASSWORD else '❌'}")
 logger.info(f"⚡ Threads:   {payout_executor._max_workers}")
 
 if __name__ == '__main__':
