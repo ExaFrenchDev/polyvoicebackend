@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
-from supabase import create_client, Client
+from supabase import create_client, Client, ClientOptions
 from typing import Optional
 import os
 
@@ -10,7 +10,11 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 API_SECRET   = os.environ["ROBLOX_API_SECRET"]
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = create_client(
+    SUPABASE_URL,
+    SUPABASE_KEY,
+    options=ClientOptions(auto_refresh_token=False, persist_session=False)
+)
 
 
 # ── Modèles ──────────────────────────────────────────────────────────────────
