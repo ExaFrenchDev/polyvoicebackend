@@ -10,11 +10,12 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 API_SECRET   = os.environ["ROBLOX_API_SECRET"]
 
-supabase: Client = create_client(
-    SUPABASE_URL,
-    SUPABASE_KEY,
-    options=ClientOptions(auto_refresh_token=False, persist_session=False)
-)
+def get_client() -> Client:
+    return create_client(
+        SUPABASE_URL,
+        SUPABASE_KEY,
+        options=ClientOptions(auto_refresh_token=False, persist_session=False)
+    )
 
 
 # ── Modèles ──────────────────────────────────────────────────────────────────
@@ -53,7 +54,7 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
     check_auth(x_api_secret)
     uid = str(payload.userId)
 
-    supabase.table("players").upsert({
+    get_client().table("players").upsert({
         "user_id":    uid,
         "argent":     payload.argent,
         "reputation": payload.reputation,
@@ -63,26 +64,26 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
     }).execute()
 
     if payload.items:
-        supabase.table("player_items").upsert({
+        get_client().table("player_items").upsert({
             "user_id": uid,
             "items":   payload.items,
         }).execute()
 
     if payload.settings:
-        supabase.table("player_settings").upsert({
+        get_client().table("player_settings").upsert({
             "user_id":  uid,
             "settings": payload.settings,
         }).execute()
 
     if payload.comments_sent or payload.comments_received:
-        supabase.table("comments").upsert({
+        get_client().table("comments").upsert({
             "user_id":  uid,
             "sent":     [c.model_dump() for c in payload.comments_sent],
             "received": [c.model_dump() for c in payload.comments_received],
         }).execute()
 
     # Snapshot pour la protection anti-perte
-    supabase.table("player_snapshots").upsert({
+    get_client().table("player_snapshots").upsert({
         "user_id":    uid,
         "argent":     payload.argent,
         "reputation": payload.reputation,
@@ -99,7 +100,7 @@ def get_snapshot(user_id: str, x_api_secret: str = Header(...)):
     check_auth(x_api_secret)
 
     try:
-        result = supabase.table("player_snapshots").select("*").eq("user_id", user_id).single().execute()
+        result = get_client().table("player_snapshots").select("*").eq("user_id", user_id).single().execute()
         return result.data or {}
     except Exception:
         return {}
@@ -109,10 +110,10 @@ def get_snapshot(user_id: str, x_api_secret: str = Header(...)):
 def get_player(user_id: str, x_api_secret: str = Header(...)):
     check_auth(x_api_secret)
 
-    player   = supabase.table("players").select("*").eq("user_id", user_id).single().execute()
-    items    = supabase.table("player_items").select("items").eq("user_id", user_id).maybe_single().execute()
-    settings = supabase.table("player_settings").select("settings").eq("user_id", user_id).maybe_single().execute()
-    comments = supabase.table("comments").select("*").eq("user_id", user_id).maybe_single().execute()
+    player   = get_client().table("players").select("*").eq("user_id", user_id).single().execute()
+    items    = get_client().table("player_items").select("items").eq("user_id", user_id).maybe_single().execute()
+    settings = get_client().table("player_settings").select("settings").eq("user_id", user_id).maybe_single().execute()
+    comments = get_client().table("comments").select("*").eq("user_id", user_id).maybe_single().execute()
 
     return {
         "player":   player.data,
