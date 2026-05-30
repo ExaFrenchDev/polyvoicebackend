@@ -24,7 +24,7 @@ class CommentEntry(BaseModel):
     authorId: int
     authorName: str
     timestamp: int
-    rep: int
+    rep: int = 10
 
 class CommentsPayload(BaseModel):
     userId: int
