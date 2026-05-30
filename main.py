@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request
 from pydantic import BaseModel
 from supabase import create_client, Client, ClientOptions
 from typing import Optional
@@ -76,6 +76,12 @@ def check_auth(x_api_secret: str):
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
+
+@app.post("/debug")
+async def debug(request: Request):
+    body = await request.json()
+    print(body)
+    return body
 
 @app.post("/sync")
 def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
