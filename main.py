@@ -31,8 +31,8 @@ class PlayerSyncPayload(BaseModel):
     userId: int
     argent: int
     reputation: int
-    items: dict[str, bool] = {}
-    settings: dict[str, bool] = {}
+    items: dict[str, object] = {}
+    settings: dict[str, object] = {}
     raised: Optional[int] = None
     donated: Optional[int] = None
     timeStats: Optional[int] = None
@@ -54,6 +54,10 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
     check_auth(x_api_secret)
     uid = str(payload.userId)
 
+    # Normalise items/settings en bool (valeurs corrompues possibles)
+    clean_items    = {k: bool(v) for k, v in payload.items.items()}
+    clean_settings = {k: bool(v) for k, v in payload.settings.items()}
+
     def safe_upsert(table: str, data: dict):
         try:
             get_client().table(table).upsert(data).execute()
@@ -70,16 +74,16 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
         "time_stats": payload.timeStats,
     })
 
-    if payload.items:
+    if clean_items:
         safe_upsert("player_items", {
             "user_id": uid,
-            "items":   payload.items,
+            "items":   clean_items,
         })
 
-    if payload.settings:
+    if clean_settings:
         safe_upsert("player_settings", {
             "user_id":  uid,
-            "settings": payload.settings,
+            "settings": clean_settings,
         })
 
     if payload.comments_sent or payload.comments_received:
@@ -112,7 +116,7 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
     except Exception:
         existing_data = {}
 
-    merged_items = {**(existing_data.get("items") or {}), **payload.items}
+    merged_items = {**(existing_data.get("items") or {}), **clean_items}
 
     snapshot_base = {
         "user_id":    uid,
