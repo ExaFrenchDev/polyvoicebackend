@@ -139,3 +139,7 @@ def get_player(user_id: str, x_api_secret: str = Header(...)):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.get("/ping")
+def ping():
+    return {"pong": True}
