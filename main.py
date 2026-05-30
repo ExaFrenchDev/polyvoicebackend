@@ -82,15 +82,49 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
             "received": [c.model_dump() for c in payload.comments_received],
         }).execute()
 
-    # Snapshot pour la protection anti-perte
-    get_client().table("player_snapshots").upsert({
-        "user_id":    uid,
-        "argent":     payload.argent,
-        "reputation": payload.reputation,
-        "raised":     payload.raised,
-        "donated":    payload.donated,
-        "items":      payload.items,
-    }).execute()
+    # ── Snapshot anti-perte ──────────────────────────────────────────────────
+    # raised/donated  → high-water mark (jamais en dessous)
+    # items           → merge (jamais retirer un item)
+    # argent/rep      → valeur actuelle (peuvent baisser légitimement)
+
+    existing = get_client().table("player_snapshots") \
+        .select("raised, donated, items, comments_sent, comments_received") \
+        .eq("user_id", uid) \
+        .maybe_single() \
+        .execute()
+
+    existing_data = existing.data or {}
+
+    merged_items = {**(existing_data.get("items") or {}), **payload.items}
+
+    def merge_comments(existing_list: list, new_list: list) -> list:
+        """Garde tous les comments du snapshot + ajoute les nouveaux (par timestamp+authorId)."""
+        seen = {(c["timestamp"], c["authorId"]) for c in existing_list}
+        merged = list(existing_list)
+        for c in new_list:
+            key = (c["timestamp"], c["authorId"])
+            if key not in seen:
+                merged.append(c)
+                seen.add(key)
+        return merged
+
+    snap_sent     = existing_data.get("comments_sent")     or []
+    snap_received = existing_data.get("comments_received") or []
+    new_sent      = [c.model_dump() for c in payload.comments_sent]
+    new_received  = [c.model_dump() for c in payload.comments_received]
+
+    snapshot_payload = {
+        "user_id":           uid,
+        "argent":            payload.argent,
+        "reputation":        payload.reputation,
+        "raised":            max(payload.raised  or 0, existing_data.get("raised")  or 0),
+        "donated":           max(payload.donated or 0, existing_data.get("donated") or 0),
+        "items":             merged_items,
+        "comments_sent":     merge_comments(snap_sent,     new_sent),
+        "comments_received": merge_comments(snap_received, new_received),
+    }
+
+    get_client().table("player_snapshots").upsert(snapshot_payload).execute()
 
     return {"ok": True}
 
