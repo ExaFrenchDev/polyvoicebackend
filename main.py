@@ -1,10 +1,19 @@
 from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from supabase import create_client, Client, ClientOptions
 from typing import Optional
 import os
 
 app = FastAPI()
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    body = await request.body()
+    print(f"[422] body={body.decode()[:500]}")
+    print(f"[422] errors={exc.errors()}")
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
