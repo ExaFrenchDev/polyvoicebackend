@@ -1,9 +1,10 @@
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+from typing import Any
 from supabase import create_client, Client, ClientOptions
-from typing import Optional
+
 import os
 
 app = FastAPI()
@@ -40,9 +41,18 @@ class PlayerSyncPayload(BaseModel):
     userId: int
     argent: int
     reputation: int
-    items: dict[str, object] = {}
-    settings: dict[str, object] = {}
+    items: Any = {}
+    settings: Any = {}
     raised: Optional[int] = None
+
+    @field_validator("items", "settings", mode="before")
+    @classmethod
+    def coerce_to_dict(cls, v):
+        if isinstance(v, list):
+            return {}
+        if isinstance(v, dict):
+            return v
+        return {}
     donated: Optional[int] = None
     timeStats: Optional[int] = None
     comments_sent: list[CommentEntry] = []
