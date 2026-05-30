@@ -31,8 +31,8 @@ class PlayerSyncPayload(BaseModel):
     userId: int
     argent: int
     reputation: int
-    items: dict[str, bool]
-    settings: dict[str, bool]
+    items: dict[str, bool] = {}
+    settings: dict[str, bool] = {}
     raised: Optional[int] = None
     donated: Optional[int] = None
     timeStats: Optional[int] = None
@@ -168,6 +168,12 @@ def get_player(user_id: str, x_api_secret: str = Header(...)):
         "settings": settings.data["settings"] if settings.data else {},
         "comments": comments.data or {},
     }
+
+
+@app.post("/sync-debug")
+async def sync_debug(request: Request):
+    body = await request.json()
+    return {"received": body}
 
 
 @app.get("/health")
