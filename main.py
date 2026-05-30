@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
-from typing import Any
+from typing import Any, Optional
 from supabase import create_client, Client, ClientOptions
 
 import os
