@@ -54,52 +54,48 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
     check_auth(x_api_secret)
     uid = str(payload.userId)
 
-    get_client().table("players").upsert({
+    def safe_upsert(table: str, data: dict):
+        try:
+            get_client().table(table).upsert(data).execute()
+        except Exception as e:
+            warn_msg = f"[sync] upsert {table} failed: {e}"
+            print(warn_msg)
+
+    safe_upsert("players", {
         "user_id":    uid,
         "argent":     payload.argent,
         "reputation": payload.reputation,
         "raised":     payload.raised,
         "donated":    payload.donated,
         "time_stats": payload.timeStats,
-    }).execute()
+    })
 
     if payload.items:
-        get_client().table("player_items").upsert({
+        safe_upsert("player_items", {
             "user_id": uid,
             "items":   payload.items,
-        }).execute()
+        })
 
     if payload.settings:
-        get_client().table("player_settings").upsert({
+        safe_upsert("player_settings", {
             "user_id":  uid,
             "settings": payload.settings,
-        }).execute()
+        })
 
     if payload.comments_sent or payload.comments_received:
-        get_client().table("comments").upsert({
+        safe_upsert("comments", {
             "user_id":  uid,
             "sent":     [c.model_dump() for c in payload.comments_sent],
             "received": [c.model_dump() for c in payload.comments_received],
-        }).execute()
+        })
 
     # ── Snapshot anti-perte ──────────────────────────────────────────────────
-    # raised/donated  → high-water mark (jamais en dessous)
-    # items           → merge (jamais retirer un item)
-    # argent/rep      → valeur actuelle (peuvent baisser légitimement)
-
-    existing = get_client().table("player_snapshots") \
-        .select("raised, donated, items, comments_sent, comments_received") \
-        .eq("user_id", uid) \
-        .maybe_single() \
-        .execute()
-
-    existing_data = existing.data or {}
-
-    merged_items = {**(existing_data.get("items") or {}), **payload.items}
+    # raised/donated  → high-water mark
+    # items           → merge
+    # argent/rep      → valeur actuelle
 
     def merge_comments(existing_list: list, new_list: list) -> list:
-        """Garde tous les comments du snapshot + ajoute les nouveaux (par timestamp+authorId)."""
-        seen = {(c["timestamp"], c["authorId"]) for c in existing_list}
+        seen   = {(c["timestamp"], c["authorId"]) for c in existing_list}
         merged = list(existing_list)
         for c in new_list:
             key = (c["timestamp"], c["authorId"])
@@ -108,23 +104,40 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
                 seen.add(key)
         return merged
 
-    snap_sent     = existing_data.get("comments_sent")     or []
-    snap_received = existing_data.get("comments_received") or []
-    new_sent      = [c.model_dump() for c in payload.comments_sent]
-    new_received  = [c.model_dump() for c in payload.comments_received]
+    try:
+        existing      = get_client().table("player_snapshots") \
+                            .select("raised, donated, items") \
+                            .eq("user_id", uid).maybe_single().execute()
+        existing_data = existing.data or {}
+    except Exception:
+        existing_data = {}
 
-    snapshot_payload = {
-        "user_id":           uid,
-        "argent":            payload.argent,
-        "reputation":        payload.reputation,
-        "raised":            max(payload.raised  or 0, existing_data.get("raised")  or 0),
-        "donated":           max(payload.donated or 0, existing_data.get("donated") or 0),
-        "items":             merged_items,
-        "comments_sent":     merge_comments(snap_sent,     new_sent),
-        "comments_received": merge_comments(snap_received, new_received),
+    merged_items = {**(existing_data.get("items") or {}), **payload.items}
+
+    snapshot_base = {
+        "user_id":    uid,
+        "argent":     payload.argent,
+        "reputation": payload.reputation,
+        "raised":     max(payload.raised  or 0, existing_data.get("raised")  or 0),
+        "donated":    max(payload.donated or 0, existing_data.get("donated") or 0),
+        "items":      merged_items,
     }
 
-    get_client().table("player_snapshots").upsert(snapshot_payload).execute()
+    # Tente d'inclure les comments si les colonnes existent
+    try:
+        existing_comments = get_client().table("player_snapshots") \
+                                .select("comments_sent, comments_received") \
+                                .eq("user_id", uid).maybe_single().execute()
+        cd            = existing_comments.data or {}
+        new_sent      = [c.model_dump() for c in payload.comments_sent]
+        new_received  = [c.model_dump() for c in payload.comments_received]
+        safe_upsert("player_snapshots", {
+            **snapshot_base,
+            "comments_sent":     merge_comments(cd.get("comments_sent")     or [], new_sent),
+            "comments_received": merge_comments(cd.get("comments_received") or [], new_received),
+        })
+    except Exception:
+        safe_upsert("player_snapshots", snapshot_base)
 
     return {"ok": True}
 
