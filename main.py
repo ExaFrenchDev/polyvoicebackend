@@ -26,35 +26,6 @@ class CommentEntry(BaseModel):
     timestamp: int
     rep: int = 10
 
-class CommentsPayload(BaseModel):
-    userId: int
-    sent: list[CommentEntry]
-    received: list[CommentEntry]
-
-class MoneyReputationPayload(BaseModel):
-    userId: int
-    argent: int
-    reputation: int
-
-class ItemsPayload(BaseModel):
-    userId: int
-    items: dict[str, bool]
-
-class SettingsPayload(BaseModel):
-    userId: int
-    fishsfx: bool
-    ldm: bool
-    boombox: bool
-    tags: bool
-    night: bool
-    shadows: bool
-
-class RaisedDonatedPayload(BaseModel):
-    userId: int
-    raised: Optional[int] = None
-    donated: Optional[int] = None
-    timeStats: Optional[int] = None
-
 class PlayerSyncPayload(BaseModel):
     userId: int
     argent: int
@@ -76,12 +47,6 @@ def check_auth(x_api_secret: str):
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
-
-@app.post("/debug")
-async def debug(request: Request):
-    body = await request.json()
-    print(body)
-    return body
 
 @app.post("/sync")
 def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
@@ -109,20 +74,35 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
             "settings": payload.settings,
         }).execute()
 
-    if payload.comments_sent:
-        rows = [
-            {
-                "author_id":   uid,
-                "target_id":   str(c.authorId),
-                "text":        c.text,
-                "rep":         c.rep,
-                "timestamp":   c.timestamp,
-            }
-            for c in payload.comments_sent
-        ]
-        supabase.table("comments").upsert(rows, on_conflict="author_id,target_id,timestamp").execute()
+    if payload.comments_sent or payload.comments_received:
+        supabase.table("comments").upsert({
+            "user_id":  uid,
+            "sent":     [c.model_dump() for c in payload.comments_sent],
+            "received": [c.model_dump() for c in payload.comments_received],
+        }).execute()
+
+    # Snapshot pour la protection anti-perte
+    supabase.table("player_snapshots").upsert({
+        "user_id":    uid,
+        "argent":     payload.argent,
+        "reputation": payload.reputation,
+        "raised":     payload.raised,
+        "donated":    payload.donated,
+        "items":      payload.items,
+    }).execute()
 
     return {"ok": True}
+
+
+@app.get("/snapshot/{user_id}")
+def get_snapshot(user_id: str, x_api_secret: str = Header(...)):
+    check_auth(x_api_secret)
+
+    try:
+        result = supabase.table("player_snapshots").select("*").eq("user_id", user_id).single().execute()
+        return result.data or {}
+    except Exception:
+        return {}
 
 
 @app.get("/player/{user_id}")
@@ -132,13 +112,13 @@ def get_player(user_id: str, x_api_secret: str = Header(...)):
     player   = supabase.table("players").select("*").eq("user_id", user_id).single().execute()
     items    = supabase.table("player_items").select("items").eq("user_id", user_id).maybe_single().execute()
     settings = supabase.table("player_settings").select("settings").eq("user_id", user_id).maybe_single().execute()
-    comments = supabase.table("comments").select("*").eq("target_id", user_id).execute()
+    comments = supabase.table("comments").select("*").eq("user_id", user_id).maybe_single().execute()
 
     return {
         "player":   player.data,
         "items":    items.data["items"] if items.data else {},
         "settings": settings.data["settings"] if settings.data else {},
-        "comments": comments.data,
+        "comments": comments.data or {},
     }
 
 
