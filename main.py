@@ -126,6 +126,6 @@ def get_player(user_id: str, x_api_secret: str = Header(...)):
 def health():
     return {"status": "ok"}
 
-@app.get("/ping")
+@app.api_route("/ping", methods=["GET", "HEAD"])
 def ping():
     return {"pong": True}
