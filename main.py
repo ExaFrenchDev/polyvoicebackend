@@ -62,6 +62,23 @@ def check_auth(x_api_secret: str):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+def is_empty_response_error(e: Exception) -> bool:
+    """Returns True if the exception is just a 204 No Content (no rows found), not a real error."""
+    s = str(e)
+    return "204" in s or "Missing response" in s
+
+
+def merge_comments(existing_list: list, new_list: list) -> list:
+    seen   = {(c["timestamp"], c["authorId"]) for c in existing_list}
+    merged = list(existing_list)
+    for c in new_list:
+        key = (c["timestamp"], c["authorId"])
+        if key not in seen:
+            merged.append(c)
+            seen.add(key)
+    return merged
+
+
 @app.post("/sync")
 def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
     check_auth(x_api_secret)
@@ -104,51 +121,32 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
             "received": [c.model_dump() for c in payload.comments_received],
         })
 
-    def merge_comments(existing_list: list, new_list: list) -> list:
-        seen   = {(c["timestamp"], c["authorId"]) for c in existing_list}
-        merged = list(existing_list)
-        for c in new_list:
-            key = (c["timestamp"], c["authorId"])
-            if key not in seen:
-                merged.append(c)
-                seen.add(key)
-        return merged
-
+    # Single SELECT fetching all snapshot fields at once (avoids double query + silences 204 false errors)
     try:
         existing = get_client().table("player_snapshots") \
-                        .select("raised, donated, items") \
+                        .select("raised, donated, items, comments_sent, comments_received") \
                         .eq("user_id", uid).maybe_single().execute()
         existing_data = existing.data or {}
     except Exception as e:
-        print(f"[sync] Error fetching existing snapshot for {uid}: {e}")
+        if not is_empty_response_error(e):
+            print(f"[sync] Error fetching existing snapshot for {uid}: {e}")
         existing_data = {}
 
     merged_items = {**(existing_data.get("items") or {}), **clean_items}
 
-    snapshot_base = {
-        "user_id":    uid,
-        "argent":     payload.argent,
-        "reputation": payload.reputation,
-        "raised":     max(payload.raised  or 0, existing_data.get("raised")  or 0),
-        "donated":    max(payload.donated or 0, existing_data.get("donated") or 0),
-        "items":      merged_items,
-    }
+    new_sent     = [c.model_dump() for c in payload.comments_sent]
+    new_received = [c.model_dump() for c in payload.comments_received]
 
-    try:
-        existing_comments = get_client().table("player_snapshots") \
-                                .select("comments_sent, comments_received") \
-                                .eq("user_id", uid).maybe_single().execute()
-        cd            = existing_comments.data or {}
-        new_sent      = [c.model_dump() for c in payload.comments_sent]
-        new_received  = [c.model_dump() for c in payload.comments_received]
-        safe_upsert("player_snapshots", {
-            **snapshot_base,
-            "comments_sent":     merge_comments(cd.get("comments_sent")     or [], new_sent),
-            "comments_received": merge_comments(cd.get("comments_received") or [], new_received),
-        })
-    except Exception as e:
-        print(f"[sync] Error handling comments for {uid}: {e}")
-        safe_upsert("player_snapshots", snapshot_base)
+    safe_upsert("player_snapshots", {
+        "user_id":           uid,
+        "argent":            payload.argent,
+        "reputation":        payload.reputation,
+        "raised":            max(payload.raised  or 0, existing_data.get("raised")  or 0),
+        "donated":           max(payload.donated or 0, existing_data.get("donated") or 0),
+        "items":             merged_items,
+        "comments_sent":     merge_comments(existing_data.get("comments_sent")     or [], new_sent),
+        "comments_received": merge_comments(existing_data.get("comments_received") or [], new_received),
+    })
 
     print(f"[sync] {uid} synced successfully")
     return {"ok": True}
@@ -183,21 +181,24 @@ def get_player(user_id: str, x_api_secret: str = Header(...)):
         items = get_client().table("player_items").select("items").eq("user_id", user_id).maybe_single().execute()
         items_data = items.data["items"] if items.data else {}
     except Exception as e:
-        print(f"[player] Error fetching items {user_id}: {e}")
+        if not is_empty_response_error(e):
+            print(f"[player] Error fetching items {user_id}: {e}")
         items_data = {}
 
     try:
         settings = get_client().table("player_settings").select("settings").eq("user_id", user_id).maybe_single().execute()
         settings_data = settings.data["settings"] if settings.data else {}
     except Exception as e:
-        print(f"[player] Error fetching settings {user_id}: {e}")
+        if not is_empty_response_error(e):
+            print(f"[player] Error fetching settings {user_id}: {e}")
         settings_data = {}
 
     try:
         comments = get_client().table("comments").select("*").eq("user_id", user_id).maybe_single().execute()
         comments_data = comments.data or {}
     except Exception as e:
-        print(f"[player] Error fetching comments {user_id}: {e}")
+        if not is_empty_response_error(e):
+            print(f"[player] Error fetching comments {user_id}: {e}")
         comments_data = {}
 
     return {
