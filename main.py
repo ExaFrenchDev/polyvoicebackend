@@ -124,7 +124,7 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
     # Single SELECT fetching all snapshot fields at once (avoids double query + silences 204 false errors)
     try:
         existing = get_client().table("player_snapshots") \
-                        .select("raised, donated, items, comments_sent, comments_received") \
+                        .select("raised, donated, items, comments_sent, comments_received, time_stats") \
                         .eq("user_id", uid).maybe_single().execute()
         existing_data = existing.data or {}
     except Exception as e:
@@ -144,6 +144,7 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
         "raised":            max(payload.raised  or 0, existing_data.get("raised")  or 0),
         "donated":           max(payload.donated or 0, existing_data.get("donated") or 0),
         "items":             merged_items,
+        "time_stats":        payload.timeStats,
         "comments_sent":     merge_comments(existing_data.get("comments_sent")     or [], new_sent),
         "comments_received": merge_comments(existing_data.get("comments_received") or [], new_received),
     })
