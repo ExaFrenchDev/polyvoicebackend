@@ -28,8 +28,6 @@ def get_client() -> Client:
     )
 
 
-# ── Modèles ──────────────────────────────────────────────────────────────────
-
 class CommentEntry(BaseModel):
     text: str
     authorId: int
@@ -59,21 +57,16 @@ class PlayerSyncPayload(BaseModel):
     comments_received: list[CommentEntry] = []
 
 
-# ── Auth ─────────────────────────────────────────────────────────────────────
-
 def check_auth(x_api_secret: str):
     if x_api_secret != API_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-
-# ── Routes ───────────────────────────────────────────────────────────────────
 
 @app.post("/sync")
 def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
     check_auth(x_api_secret)
     uid = str(payload.userId)
 
-    # Normalise items/settings en bool (valeurs corrompues possibles)
     clean_items    = {k: bool(v) for k, v in payload.items.items()}
     clean_settings = {k: bool(v) for k, v in payload.settings.items()}
 
@@ -81,8 +74,7 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
         try:
             get_client().table(table).upsert(data).execute()
         except Exception as e:
-            warn_msg = f"[sync] upsert {table} failed: {e}"
-            print(warn_msg)
+            print(f"[sync] upsert {table} for {uid} failed: {e}")
 
     safe_upsert("players", {
         "user_id":    uid,
@@ -112,11 +104,6 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
             "received": [c.model_dump() for c in payload.comments_received],
         })
 
-    # ── Snapshot anti-perte ──────────────────────────────────────────────────
-    # raised/donated  → high-water mark
-    # items           → merge
-    # argent/rep      → valeur actuelle
-
     def merge_comments(existing_list: list, new_list: list) -> list:
         seen   = {(c["timestamp"], c["authorId"]) for c in existing_list}
         merged = list(existing_list)
@@ -128,11 +115,12 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
         return merged
 
     try:
-        existing      = get_client().table("player_snapshots") \
-                            .select("raised, donated, items") \
-                            .eq("user_id", uid).maybe_single().execute()
+        existing = get_client().table("player_snapshots") \
+                        .select("raised, donated, items") \
+                        .eq("user_id", uid).maybe_single().execute()
         existing_data = existing.data or {}
-    except Exception:
+    except Exception as e:
+        print(f"[sync] Error fetching existing snapshot for {uid}: {e}")
         existing_data = {}
 
     merged_items = {**(existing_data.get("items") or {}), **clean_items}
@@ -146,7 +134,6 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
         "items":      merged_items,
     }
 
-    # Tente d'inclure les comments si les colonnes existent
     try:
         existing_comments = get_client().table("player_snapshots") \
                                 .select("comments_sent, comments_received") \
@@ -159,9 +146,11 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
             "comments_sent":     merge_comments(cd.get("comments_sent")     or [], new_sent),
             "comments_received": merge_comments(cd.get("comments_received") or [], new_received),
         })
-    except Exception:
+    except Exception as e:
+        print(f"[sync] Error handling comments for {uid}: {e}")
         safe_upsert("player_snapshots", snapshot_base)
 
+    print(f"[sync] {uid} synced successfully")
     return {"ok": True}
 
 
@@ -171,8 +160,11 @@ def get_snapshot(user_id: str, x_api_secret: str = Header(...)):
 
     try:
         result = get_client().table("player_snapshots").select("*").eq("user_id", user_id).single().execute()
-        return result.data or {}
-    except Exception:
+        data = result.data or {}
+        print(f"[snapshot] {user_id}: argent={data.get('argent')}, rep={data.get('reputation')}, raised={data.get('raised')}, donated={data.get('donated')}")
+        return data
+    except Exception as e:
+        print(f"[snapshot] Error fetching snapshot for {user_id}: {e}")
         return {}
 
 
@@ -180,22 +172,46 @@ def get_snapshot(user_id: str, x_api_secret: str = Header(...)):
 def get_player(user_id: str, x_api_secret: str = Header(...)):
     check_auth(x_api_secret)
 
-    player   = get_client().table("players").select("*").eq("user_id", user_id).single().execute()
-    items    = get_client().table("player_items").select("items").eq("user_id", user_id).maybe_single().execute()
-    settings = get_client().table("player_settings").select("settings").eq("user_id", user_id).maybe_single().execute()
-    comments = get_client().table("comments").select("*").eq("user_id", user_id).maybe_single().execute()
+    try:
+        player = get_client().table("players").select("*").eq("user_id", user_id).single().execute()
+        player_data = player.data or {}
+    except Exception as e:
+        print(f"[player] Error fetching player {user_id}: {e}")
+        player_data = {}
+
+    try:
+        items = get_client().table("player_items").select("items").eq("user_id", user_id).maybe_single().execute()
+        items_data = items.data["items"] if items.data else {}
+    except Exception as e:
+        print(f"[player] Error fetching items {user_id}: {e}")
+        items_data = {}
+
+    try:
+        settings = get_client().table("player_settings").select("settings").eq("user_id", user_id).maybe_single().execute()
+        settings_data = settings.data["settings"] if settings.data else {}
+    except Exception as e:
+        print(f"[player] Error fetching settings {user_id}: {e}")
+        settings_data = {}
+
+    try:
+        comments = get_client().table("comments").select("*").eq("user_id", user_id).maybe_single().execute()
+        comments_data = comments.data or {}
+    except Exception as e:
+        print(f"[player] Error fetching comments {user_id}: {e}")
+        comments_data = {}
 
     return {
-        "player":   player.data,
-        "items":    items.data["items"] if items.data else {},
-        "settings": settings.data["settings"] if settings.data else {},
-        "comments": comments.data or {},
+        "player":   player_data,
+        "items":    items_data,
+        "settings": settings_data,
+        "comments": comments_data,
     }
 
 
 @app.post("/sync-debug")
 async def sync_debug(request: Request):
     body = await request.json()
+    print(f"[debug] {body}")
     return {"received": body}
 
 
