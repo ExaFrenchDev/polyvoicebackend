@@ -186,24 +186,24 @@ def get_player(user_id: str, x_api_secret: str = Header(...)):
         player_data = {}
 
     try:
-        items = get_client().table("player_items").select("items").eq("user_id", user_id).maybe_single().execute()
-        items_data = items.data["items"] if items.data else {}
+        items_result = get_client().table("player_items").select("items").eq("user_id", user_id).maybe_single().execute()
+        items_data = items_result.data["items"] if (items_result and items_result.data) else {}
     except Exception as e:
         if not is_empty_response_error(e):
             print(f"[player] Error fetching items {user_id}: {e}")
         items_data = {}
 
     try:
-        settings = get_client().table("player_settings").select("settings").eq("user_id", user_id).maybe_single().execute()
-        settings_data = settings.data["settings"] if settings.data else {}
+        settings_result = get_client().table("player_settings").select("settings").eq("user_id", user_id).maybe_single().execute()
+        settings_data = settings_result.data["settings"] if (settings_result and settings_result.data) else {}
     except Exception as e:
         if not is_empty_response_error(e):
             print(f"[player] Error fetching settings {user_id}: {e}")
         settings_data = {}
 
     try:
-        comments = get_client().table("comments").select("*").eq("user_id", user_id).maybe_single().execute()
-        comments_data = comments.data or {}
+        comments_result = get_client().table("comments").select("*").eq("user_id", user_id).maybe_single().execute()
+        comments_data = comments_result.data if comments_result and comments_result.data else {}
     except Exception as e:
         if not is_empty_response_error(e):
             print(f"[player] Error fetching comments {user_id}: {e}")
