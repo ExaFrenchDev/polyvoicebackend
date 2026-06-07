@@ -41,16 +41,16 @@ class PlayerSyncPayload(BaseModel):
     reputation: int
     items: Any = {}
     settings: Any = {}
+    fish_inventory: Any = {}
     raised: Optional[int] = None
 
-    @field_validator("items", "settings", mode="before")
+    @field_validator("items", "settings", "fish_inventory", mode="before")
     @classmethod
     def coerce_to_dict(cls, v):
-        if isinstance(v, list):
-            return {}
         if isinstance(v, dict):
             return v
         return {}
+
     donated: Optional[int] = None
     timeStats: Optional[int] = None
     comments_sent: list[CommentEntry] = []
@@ -63,7 +63,6 @@ def check_auth(x_api_secret: str):
 
 
 def is_empty_response_error(e: Exception) -> bool:
-    """Returns True if the exception is just a 204 No Content (no rows found), not a real error."""
     s = str(e)
     return "204" in s or "Missing response" in s
 
@@ -79,6 +78,13 @@ def merge_comments(existing_list: list, new_list: list) -> list:
     return merged
 
 
+def merge_fish(existing: dict, incoming: dict) -> dict:
+    merged = dict(existing)
+    for fish, count in incoming.items():
+        merged[fish] = max(int(merged.get(fish) or 0), int(count or 0))
+    return merged
+
+
 @app.post("/sync")
 def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
     check_auth(x_api_secret)
@@ -86,6 +92,7 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
 
     clean_items    = {k: bool(v) for k, v in payload.items.items()}
     clean_settings = {k: bool(v) for k, v in payload.settings.items()}
+    clean_fish     = {k: int(v) for k, v in payload.fish_inventory.items() if int(v or 0) > 0}
 
     def safe_upsert(table: str, data: dict):
         try:
@@ -121,10 +128,9 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
             "received": [c.model_dump() for c in payload.comments_received],
         })
 
-    # Single SELECT fetching all snapshot fields at once (avoids double query + silences 204 false errors)
     try:
         existing = get_client().table("player_snapshots") \
-                        .select("raised, donated, items, comments_sent, comments_received, time_stats") \
+                        .select("raised, donated, items, comments_sent, comments_received, time_stats, fish_inventory") \
                         .eq("user_id", uid).maybe_single().execute()
         existing_data = existing.data or {}
     except Exception as e:
@@ -133,7 +139,7 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
         existing_data = {}
 
     merged_items = {**(existing_data.get("items") or {}), **clean_items}
-
+    merged_fish  = merge_fish(existing_data.get("fish_inventory") or {}, clean_fish)
     new_sent     = [c.model_dump() for c in payload.comments_sent]
     new_received = [c.model_dump() for c in payload.comments_received]
 
@@ -145,6 +151,7 @@ def sync_player(payload: PlayerSyncPayload, x_api_secret: str = Header(...)):
         "donated":           max(payload.donated or 0, existing_data.get("donated") or 0),
         "items":             merged_items,
         "time_stats":        payload.timeStats,
+        "fish_inventory":    merged_fish,
         "comments_sent":     merge_comments(existing_data.get("comments_sent")     or [], new_sent),
         "comments_received": merge_comments(existing_data.get("comments_received") or [], new_received),
     })
@@ -160,7 +167,7 @@ def get_snapshot(user_id: str, x_api_secret: str = Header(...)):
     try:
         result = get_client().table("player_snapshots").select("*").eq("user_id", user_id).single().execute()
         data = result.data or {}
-        print(f"[snapshot] {user_id}: argent={data.get('argent')}, rep={data.get('reputation')}, raised={data.get('raised')}, donated={data.get('donated')}")
+        print(f"[snapshot] {user_id}: argent={data.get('argent')}, rep={data.get('reputation')}, raised={data.get('raised')}, donated={data.get('donated')}, fish={len(data.get('fish_inventory') or {})}")
         return data
     except Exception as e:
         print(f"[snapshot] Error fetching snapshot for {user_id}: {e}")
