@@ -227,6 +227,18 @@ async def get_player(user_id: str, x_api_secret: str = Header(...)):
         "comments": comments if isinstance(comments, dict) else {},
     })
 
+@app.get("/all-players")
+async def get_all_players(x_api_secret: str = Header(...)):
+    check_auth(x_api_secret)
+    
+    try:
+        result = get_client().table("player_snapshots").select("user_id,raised,donated").execute()
+        players = result.data or []
+        return JSONResponse({"players": players})
+    except Exception as e:
+        print(f"[all-players] Error: {e}")
+        return JSONResponse({"players": []})
+
 
 @app.post("/sync-debug")
 async def sync_debug(request: Request):
