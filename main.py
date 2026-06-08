@@ -6,6 +6,7 @@ from typing import Any, Optional
 from supabase import create_client, Client, ClientOptions
 import asyncio
 import os
+import requests
 
 app = FastAPI()
 
@@ -245,6 +246,27 @@ async def sync_debug(request: Request):
     body = await request.json()
     print(f"[debug] {body}")
     return ORJSONResponse({"received": body})
+
+
+@app.get("/visits")
+async def get_visits(x_api_secret: str = Header(...)):
+    check_auth(x_api_secret)
+    
+    try:
+        GAME_ID = os.environ.get("ROBLOX_GAME_ID", "10286140682")
+        response = requests.get(f"https://games.roblox.com/v1/games?universeIds={GAME_ID}", timeout=5)
+        data = response.json()
+        
+        if data and data.get("data") and len(data["data"]) > 0:
+            visits = int(data["data"][0].get("visits", 0))
+            print(f"[visits] {visits}")
+            return ORJSONResponse({"visits": visits})
+        else:
+            print(f"[visits] Invalid response from Roblox API")
+            return ORJSONResponse({"visits": 0})
+    except Exception as e:
+        print(f"[visits] Error: {e}")
+        return ORJSONResponse({"visits": 0})
 
 
 @app.get("/health")
