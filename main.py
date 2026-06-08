@@ -257,15 +257,10 @@ async def get_visits(x_api_secret: str = Header(...)):
         response = requests.get(f"https://games.roblox.com/v1/games?universeIds={GAME_ID}", timeout=5)
         data = response.json()
         
-        print(f"[visits] Full response: {data}")
-        
         if data and data.get("data") and len(data["data"]) > 0:
             visits = int(data["data"][0].get("visits", 0))
-            print(f"[visits] {visits}")
             return ORJSONResponse({"visits": visits})
         else:
-            print(f"[visits] No data found in response")
-            print(f"[visits] Response keys: {data.keys() if data else 'None'}")
             return ORJSONResponse({"visits": 0})
     except Exception as e:
         print(f"[visits] Error: {e}")
